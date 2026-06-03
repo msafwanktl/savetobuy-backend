@@ -1,9 +1,14 @@
-import sqlite3
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
-from fastapi.middleware.cors import CORSMiddleware
+import sqlite3
+import google.generativeai as genai
+import os # NEW: This lets Python read secret server variables
 
 app = FastAPI()
+
+# NEW: Securely pull the key from the server's hidden vault
+api_key = os.environ.get("GEMINI_API_KEY")
+genai.configure(api_key=api_key)
 
 # Allow the app to talk to the server safely
 app.add_middleware(
@@ -175,3 +180,27 @@ def get_savings_history():
             "product": log["product_name"]
         })
     return history
+
+# NEW: The AI Financial Coach Endpoint
+@app.get("/api/v1/coach/{goal_id}")
+def get_ai_coach(goal_id: int):
+    db = get_db()
+    # 1. Fetch the specific goal
+    goal = db.execute("SELECT product_name, target_price FROM goals WHERE goal_id = ?", (goal_id,)).fetchone()
+    if not goal:
+        return {"advice": "Goal not found."}
+        
+    # 2. Fetch the current savings total
+    logs = db.execute("SELECT SUM(amount_saved) as total FROM savings_logs WHERE goal_id = ?", (goal_id,)).fetchone()
+    current_saved = logs["total"] if logs["total"] else 0
+    
+    # 3. Build the prompt for the AI
+    prompt = f"I am saving up for {goal['product_name']} which costs ₹{goal['target_price']}. I currently have ₹{current_saved} saved. Give me a 2-sentence highly motivating, practical financial tip to help me reach my goal faster. Be energetic and concise."
+    
+    try:
+        # 4. Generate the response
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        return {"advice": response.text.strip()}
+    except Exception as e:
+        return {"advice": "Keep pushing! Every rupee counts towards your goal."}
