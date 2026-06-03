@@ -1,11 +1,20 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware  # <-- THIS FIXES THE CRASH
 from pydantic import BaseModel
 import sqlite3
-import google.generativeai as genai
-import os # NEW: This lets Python read secret server variables
+import os
+from google import genai  # <-- THIS IS THE NEW GOOGLE AI SDK
 
 app = FastAPI()
 
+# Add your CORS setup (assuming you have something like this):
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # NEW: Securely pull the key from the server's hidden vault
 api_key = os.environ.get("GEMINI_API_KEY")
 genai.configure(api_key=api_key)
@@ -181,26 +190,28 @@ def get_savings_history():
         })
     return history
 
-# NEW: The AI Financial Coach Endpoint
 @app.get("/api/v1/coach/{goal_id}")
 def get_ai_coach(goal_id: int):
     db = get_db()
-    # 1. Fetch the specific goal
     goal = db.execute("SELECT product_name, target_price FROM goals WHERE goal_id = ?", (goal_id,)).fetchone()
     if not goal:
         return {"advice": "Goal not found."}
         
-    # 2. Fetch the current savings total
     logs = db.execute("SELECT SUM(amount_saved) as total FROM savings_logs WHERE goal_id = ?", (goal_id,)).fetchone()
     current_saved = logs["total"] if logs["total"] else 0
     
-    # 3. Build the prompt for the AI
     prompt = f"I am saving up for {goal['product_name']} which costs ₹{goal['target_price']}. I currently have ₹{current_saved} saved. Give me a 2-sentence highly motivating, practical financial tip to help me reach my goal faster. Be energetic and concise."
     
     try:
-        # 4. Generate the response
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
+        # NEW GOOGLE SDK SYNTAX:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        client = genai.Client(api_key=api_key)
+        
+        response = client.models.generate_content(
+            model='gemini-2.5-flash', # Upgraded to the latest fast model
+            contents=prompt
+        )
         return {"advice": response.text.strip()}
     except Exception as e:
+        print(f"AI Error: {e}") # This will print to Render logs if it fails again
         return {"advice": "Keep pushing! Every rupee counts towards your goal."}
