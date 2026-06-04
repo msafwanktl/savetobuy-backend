@@ -186,3 +186,49 @@ def get_ai_coach(goal_id: int):
     except Exception as e:
         print(f"AI Error: {e}")
         return {"advice": "Keep pushing! Every rupee counts towards your goal."}
+    
+    # NEW: The Predictive Timeline Endpoint
+@app.get("/api/v1/predict/{goal_id}")
+def get_prediction(goal_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    # 1. Get the Goal Info
+    cursor.execute("SELECT product_name, target_price FROM goals WHERE goal_id = %s", (goal_id,))
+    goal = cursor.fetchone()
+    
+    # 2. Get the exact history of deposits for this specific goal
+    cursor.execute("SELECT amount_saved, created_at FROM savings_logs WHERE goal_id = %s ORDER BY created_at ASC", (goal_id,))
+    logs = cursor.fetchall()
+    
+    cursor.close()
+    conn.close()
+    
+    if not goal:
+        return {"prediction": "Goal not found."}
+        
+    if len(logs) == 0:
+        return {"prediction": "Add some money first so I can analyze your saving habits!"}
+        
+    current_saved = sum(log["amount_saved"] for log in logs)
+    
+    if current_saved >= goal["target_price"]:
+        return {"prediction": "You already reached your goal! Go buy it!"}
+        
+    # 3. Format the history into a sentence for the AI to read
+    history_text = ", ".join([f"₹{log['amount_saved']} on {str(log['created_at'])[:10]}" for log in logs])
+    
+    # 4. Ask Gemini to do the math and forecast the date
+    prompt = f"I am saving for a {goal['product_name']} that costs ₹{goal['target_price']}. I have currently saved ₹{current_saved}. Here is my exact deposit history: {history_text}. Based strictly on the frequency and amounts of these past deposits, predict the specific date (or month) I will reach my goal. Give me a 2-sentence encouraging prediction."
+    
+    try:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash', 
+            contents=prompt
+        )
+        return {"prediction": response.text.strip()}
+    except Exception as e:
+        print(f"AI Error: {e}")
+        return {"prediction": "Keep depositing consistently so we can predict your timeline!"}
