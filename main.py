@@ -4,10 +4,10 @@ from pydantic import BaseModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
+import base64
+import json
 from google import genai
-from google.genai import types # NEW: Needed for sending images to Gemini
-import base64 # NEW: For reading the image file
-import json # NEW: For cleaning up the AI's response
+from google.genai import types
 
 app = FastAPI()
 
@@ -19,7 +19,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Connect to the new Neon Postgres Database
 def get_db_connection():
     return psycopg2.connect(os.environ.get("DATABASE_URL"))
 
@@ -28,12 +27,14 @@ def startup():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Upgraded table creation using Postgres dialect
     cursor.execute('''CREATE TABLE IF NOT EXISTS goals (
         goal_id SERIAL PRIMARY KEY,
         product_name TEXT,
         target_price REAL
     )''')
+    
+    cursor.execute('ALTER TABLE goals ADD COLUMN IF NOT EXISTS image_url TEXT')
+    cursor.execute('ALTER TABLE goals ADD COLUMN IF NOT EXISTS product_link TEXT')
     
     cursor.execute('''CREATE TABLE IF NOT EXISTS savings_logs (
         log_id SERIAL PRIMARY KEY,
@@ -42,41 +43,45 @@ def startup():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     
-    # Inject test data if empty
-    cursor.execute("SELECT COUNT(*) FROM goals")
-    if cursor.fetchone()[0] == 0:
-        cursor.execute("INSERT INTO goals (product_name, target_price) VALUES ('Sony Headphones', 50000.0)")
-        cursor.execute("INSERT INTO savings_logs (goal_id, amount_saved) VALUES (1, 15000.0)")
-    
     conn.commit()
     cursor.close()
     conn.close()
 
-# Pydantic Models
+# ----------------- PYDANTIC MODELS -----------------
+
 class GoalCreate(BaseModel):
     product_name: str
     target_price: float
-
-class SavingsLogCreate(BaseModel):
-    goal_id: int
-    amount_saved: float
+    image_url: str = ""
+    product_link: str = ""
 
 class GoalUpdate(BaseModel):
     product_name: str
     target_price: float
+    image_url: str = ""
+    product_link: str = ""
+
+class SavingsLogCreate(BaseModel):
+    goal_id: int
+    amount_saved: float
     
 class ImageRequest(BaseModel):
     image_base64: str
     mime_type: str = "image/jpeg"
-    
+
 class SmartSplitRequest(BaseModel):
     amount: float
+
+class LinkRequest(BaseModel):
+    link: str
+
+# ----------------- CORE DATABASE ROUTES -----------------
 
 @app.get("/api/v1/all-goals")
 def get_all_goals():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("SELECT * FROM goals")
+    cursor.execute("SELECT * FROM goals ORDER BY goal_id DESC")
     goals = cursor.fetchall()
     
     result = []
@@ -84,7 +89,6 @@ def get_all_goals():
         cursor.execute("SELECT SUM(amount_saved) as total FROM savings_logs WHERE goal_id = %s", (goal['goal_id'],))
         log = cursor.fetchone()
         current_saved = log["total"] if log["total"] else 0
-        
         percentage = min(int((current_saved / goal['target_price']) * 100), 100)
         
         result.append({
@@ -92,7 +96,9 @@ def get_all_goals():
             "product_name": goal['product_name'],
             "target_price": goal['target_price'],
             "current_saved": current_saved,
-            "percentage_complete": percentage
+            "percentage_complete": percentage,
+            "image_url": goal.get('image_url') or "",
+            "product_link": goal.get('product_link') or ""
         })
         
     cursor.close()
@@ -103,7 +109,10 @@ def get_all_goals():
 def log_savings(log: SavingsLogCreate):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO savings_logs (goal_id, amount_saved) VALUES (%s, %s)", (log.goal_id, log.amount_saved))
+    cursor.execute(
+        "INSERT INTO savings_logs (goal_id, amount_saved) VALUES (%s, %s)", 
+        (log.goal_id, log.amount_saved)
+    )
     conn.commit()
     cursor.close()
     conn.close()
@@ -113,7 +122,10 @@ def log_savings(log: SavingsLogCreate):
 def create_goal(goal: GoalCreate):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO goals (product_name, target_price) VALUES (%s, %s)", (goal.product_name, goal.target_price))
+    cursor.execute(
+        "INSERT INTO goals (product_name, target_price, image_url, product_link) VALUES (%s, %s, %s, %s)", 
+        (goal.product_name, goal.target_price, goal.image_url, goal.product_link)
+    )
     conn.commit()
     cursor.close()
     conn.close()
@@ -134,7 +146,10 @@ def delete_goal(goal_id: int):
 def edit_goal(goal_id: int, goal: GoalUpdate):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE goals SET product_name = %s, target_price = %s WHERE goal_id = %s", (goal.product_name, goal.target_price, goal_id))
+    cursor.execute(
+        "UPDATE goals SET product_name = %s, target_price = %s, image_url = %s, product_link = %s WHERE goal_id = %s", 
+        (goal.product_name, goal.target_price, goal.image_url, goal.product_link, goal_id)
+    )
     conn.commit()
     cursor.close()
     conn.close()
@@ -146,189 +161,141 @@ def get_savings_history():
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute('''
         SELECT logs.log_id, logs.amount_saved, logs.created_at, goals.product_name 
-        FROM savings_logs logs
-        JOIN goals ON logs.goal_id = goals.goal_id
+        FROM savings_logs logs 
+        JOIN goals ON logs.goal_id = goals.goal_id 
         ORDER BY logs.log_id DESC
     ''')
     logs = cursor.fetchall()
     
     history = []
-    for log in logs:
+    for l in logs:
         history.append({
-            "id": log["log_id"],
-            "amount": log["amount_saved"],
-            "date": str(log["created_at"])[:16],
-            "product": log["product_name"]
+            "id": l["log_id"], 
+            "amount": l["amount_saved"], 
+            "date": str(l["created_at"])[:16], 
+            "product": l["product_name"]
         })
+        
     cursor.close()
     conn.close()
     return history
+
+
+# ----------------- AI SUPERPOWER ROUTES -----------------
 
 @app.get("/api/v1/coach/{goal_id}")
 def get_ai_coach(goal_id: int):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    
     cursor.execute("SELECT product_name, target_price FROM goals WHERE goal_id = %s", (goal_id,))
     goal = cursor.fetchone()
-    if not goal:
-        cursor.close()
-        conn.close()
-        return {"advice": "Goal not found."}
-        
-    cursor.execute("SELECT SUM(amount_saved) as total FROM savings_logs WHERE goal_id = %s", (goal_id,))
-    logs = cursor.fetchone()
-    current_saved = logs["total"] if logs["total"] else 0
     
+    cursor.execute("SELECT SUM(amount_saved) as total FROM savings_logs WHERE goal_id = %s", (goal_id,))
+    log_data = cursor.fetchone()
+    current_saved = log_data["total"] if log_data["total"] else 0
     cursor.close()
     conn.close()
     
-    prompt = f"I am saving up for {goal['product_name']} which costs ₹{goal['target_price']}. I currently have ₹{current_saved} saved. Give me a 2-sentence highly motivating, practical financial tip to help me reach my goal faster. Be energetic and concise."
+    prompt = f"I am saving up for {goal['product_name']} which costs ₹{goal['target_price']}. I currently have ₹{current_saved} saved. Give me a 2-sentence highly motivating, practical financial tip. Be energetic."
     
     try:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model='gemini-2.5-flash', 
-            contents=prompt
-        )
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         return {"advice": response.text.strip()}
     except Exception as e:
-        print(f"AI Error: {e}")
+        print(f"Coach Error: {e}")
         return {"advice": "Keep pushing! Every rupee counts towards your goal."}
     
-    # NEW: The Predictive Timeline Endpoint
 @app.get("/api/v1/predict/{goal_id}")
 def get_prediction(goal_id: int):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    
-    # 1. Get the Goal Info
     cursor.execute("SELECT product_name, target_price FROM goals WHERE goal_id = %s", (goal_id,))
     goal = cursor.fetchone()
     
-    # 2. Get the exact history of deposits for this specific goal
     cursor.execute("SELECT amount_saved, created_at FROM savings_logs WHERE goal_id = %s ORDER BY created_at ASC", (goal_id,))
     logs = cursor.fetchall()
-    
     cursor.close()
     conn.close()
     
-    if not goal:
-        return {"prediction": "Goal not found."}
-        
-    if len(logs) == 0:
+    if len(logs) == 0: 
         return {"prediction": "Add some money first so I can analyze your saving habits!"}
         
     current_saved = sum(log["amount_saved"] for log in logs)
-    
-    if current_saved >= goal["target_price"]:
+    if current_saved >= goal["target_price"]: 
         return {"prediction": "You already reached your goal! Go buy it!"}
-        
-    # 3. Format the history into a sentence for the AI to read
-    history_text = ", ".join([f"₹{log['amount_saved']} on {str(log['created_at'])[:10]}" for log in logs])
     
-    # 4. Ask Gemini to do the math and forecast the date
-    prompt = f"I am saving for a {goal['product_name']} that costs ₹{goal['target_price']}. I have currently saved ₹{current_saved}. Here is my exact deposit history: {history_text}. Based strictly on the frequency and amounts of these past deposits, predict the specific date (or month) I will reach my goal. Give me a 2-sentence encouraging prediction."
+    history_text = ", ".join([f"₹{log['amount_saved']} on {str(log['created_at'])[:10]}" for log in logs])
+    prompt = f"I am saving for a {goal['product_name']} that costs ₹{goal['target_price']}. I have currently saved ₹{current_saved}. Here is my deposit history: {history_text}. Predict the specific date (or month) I will reach my goal in 2 sentences."
     
     try:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model='gemini-2.5-flash', 
-            contents=prompt
-        )
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         return {"prediction": response.text.strip()}
     except Exception as e:
-        print(f"AI Error: {e}")
+        print(f"Predict Error: {e}")
         return {"prediction": "Keep depositing consistently so we can predict your timeline!"}
-    
-    # NEW: Snap to Save (Vision AI) Endpoint
+
 @app.post("/api/v1/vision/extract-goal")
 def extract_goal_from_image(req: ImageRequest):
     try:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        client = genai.Client(api_key=api_key)
-        
-        # 1. Decode the image string back into actual bytes
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         image_bytes = base64.b64decode(req.image_base64)
         
-        # 2. Tell Gemini EXACTLY what we want
         prompt = """
         Analyze this image. Find the main product being shown and its price. 
         Respond ONLY with a valid JSON object matching this exact format, with no markdown, no code blocks, and no extra text:
         {"product_name": "Name of Product", "target_price": 0.0}
         """
         
-        # 3. Send both the text prompt and the image to the Vision model
         response = client.models.generate_content(
             model='gemini-2.5-flash', 
-            contents=[
-                prompt,
-                types.Part.from_bytes(data=image_bytes, mime_type=req.mime_type)
-            ]
+            contents=[prompt, types.Part.from_bytes(data=image_bytes, mime_type=req.mime_type)]
         )
         
-        # 4. Clean the response and send it back to the app
         raw_text = response.text.strip().replace("```json", "").replace("```", "")
         return json.loads(raw_text)
-        
     except Exception as e:
         print(f"Vision AI Error: {e}")
-        return {"error": "Could not read the image. Please enter manually."}
-    
-    # NEW: The Deal Hunter (Live Search AI) Endpoint
+        return {"error": "Could not read the image."}
+
 @app.get("/api/v1/deal-hunter/{goal_id}")
 def find_deals(goal_id: int):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    
     cursor.execute("SELECT product_name, target_price FROM goals WHERE goal_id = %s", (goal_id,))
     goal = cursor.fetchone()
     
     cursor.execute("SELECT SUM(amount_saved) as total FROM savings_logs WHERE goal_id = %s", (goal_id,))
-    logs = cursor.fetchone()
-    current_saved = logs["total"] if logs["total"] else 0
-    
+    log_data = cursor.fetchone()
+    current_saved = log_data["total"] if log_data["total"] else 0
     cursor.close()
     conn.close()
     
-    if not goal:
-        return {"deal": "Goal not found.", "link": ""}
-        
     prompt = f"""
-    I am saving for a '{goal['product_name']}'. My original target price was ₹{goal['target_price']}, and I currently have ₹{current_saved} saved. 
-    Search the live internet for current prices of this product in India (Amazon, Flipkart, etc.). 
-    Respond ONLY with a valid JSON object matching this exact format, with no markdown, no code blocks, and no extra text:
-    {{"deal": "A brief, exciting 2-sentence response detailing the lowest price found.", "link": "The exact direct web URL link to the product listing found"}}
+    Search live internet for current prices of '{goal['product_name']}' in India. Target was ₹{goal['target_price']}. 
+    Respond ONLY with a valid JSON object matching this exact format, with no markdown, no extra text:
+    {{"deal": "A brief exciting 2-sentence response detailing lowest price.", "link": "Direct web URL to product"}}
     """
     
     try:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        client = genai.Client(api_key=api_key)
-        
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         response = client.models.generate_content(
             model='gemini-2.5-flash', 
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=[{"google_search": {}}]
-            )
+            contents=prompt, 
+            config=types.GenerateContentConfig(tools=[{"google_search": {}}])
         )
         
         raw_text = response.text.strip().replace("```json", "").replace("```", "")
         parsed_data = json.loads(raw_text)
-        
         return {
-            "deal": parsed_data.get("deal", "Check out the link below!"),
+            "deal": parsed_data.get("deal"), 
             "link": parsed_data.get("link", "")
         }
     except Exception as e:
         print(f"Deal Hunter Error: {e}")
-        return {"deal": "Could not connect to the internet to find deals right now. Keep saving!", "link": ""}
-    
-    # ==========================================
-# V5.0 AI FEATURE 1: The Dupe Finder
-# ==========================================
+        return {"deal": "Could not find deals right now.", "link": ""}
+
 @app.get("/api/v1/dupe-hunter/{goal_id}")
 def find_dupe(goal_id: int):
     conn = get_db_connection()
@@ -337,91 +304,137 @@ def find_dupe(goal_id: int):
     goal = cursor.fetchone()
     cursor.close()
     conn.close()
-    
-    if not goal:
-        return {"error": "Goal not found."}
         
     prompt = f"""
-    I am saving for a '{goal['product_name']}' which costs ₹{goal['target_price']}. 
-    Search the live internet for a highly-rated, significantly cheaper alternative (a "dupe") available in India.
-    Respond ONLY with a valid JSON object matching this exact format, with no markdown or backticks:
-    {{"dupe_name": "Name of the cheaper alternative", "dupe_price": 0.0, "reason": "1-sentence reason why it is a great swap.", "link": "Direct URL to the product"}}
+    Search live internet for a highly-rated, significantly cheaper alternative (dupe) to '{goal['product_name']}' (₹{goal['target_price']}) in India.
+    Respond ONLY with a valid JSON object matching this exact format, with no markdown, no extra text:
+    {{"dupe_name": "Name", "dupe_price": 0.0, "reason": "1-sentence reason.", "link": "URL"}}
     """
     
     try:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        client = genai.Client(api_key=api_key)
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         response = client.models.generate_content(
             model='gemini-2.5-flash', 
-            contents=prompt,
+            contents=prompt, 
             config=types.GenerateContentConfig(tools=[{"google_search": {}}])
         )
+        
         raw_text = response.text.strip().replace("```json", "").replace("```", "")
         return json.loads(raw_text)
     except Exception as e:
         print(f"Dupe Error: {e}")
         return {"error": "Could not find a cheaper alternative right now."}
 
-# ==========================================
-# V5.0 AI FEATURE 2: Smart Portfolio Split
-# ==========================================
 @app.post("/api/v1/smart-split")
 def smart_split(req: SmartSplitRequest):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    
-    # Get all incomplete goals
     cursor.execute("SELECT * FROM goals")
     all_goals = cursor.fetchall()
     
     active_goals = []
     for g in all_goals:
         cursor.execute("SELECT SUM(amount_saved) as total FROM savings_logs WHERE goal_id = %s", (g['goal_id'],))
-        saved = cursor.fetchone()['total'] or 0
+        log_data = cursor.fetchone()
+        saved = log_data['total'] if log_data['total'] else 0
+        
         if saved < g['target_price']:
             active_goals.append({
-                "goal_id": g['goal_id'],
-                "product_name": g['product_name'],
-                "target_price": g['target_price'],
-                "current_saved": saved,
+                "goal_id": g['goal_id'], 
+                "product_name": g['product_name'], 
+                "target_price": g['target_price'], 
                 "amount_needed": g['target_price'] - saved
             })
             
-    if not active_goals:
+    if len(active_goals) == 0: 
         cursor.close()
         conn.close()
-        return {"message": "You have no active goals to fund! Add a new goal first."}
+        return {"message": "You have no active goals to fund!"}
 
-    # Ask Gemini to do the math
     prompt = f"""
-    I have ₹{req.amount} to deposit right now. Here are my active goals: {json.dumps(active_goals)}. 
-    Act as a financial advisor. Distribute the ₹{req.amount} across these goals. 
-    Mathematical Rules:
-    1. Do NOT allocate more than the 'amount_needed' for any goal.
-    2. The sum of allocations MUST equal exactly ₹{req.amount}.
-    Respond ONLY with a valid JSON array of objects matching this format:
-    [{{"goal_id": 1, "allocated_amount": 500}}, {{"goal_id": 2, "allocated_amount": 500}}]
+    Distribute ₹{req.amount} across these goals: {json.dumps(active_goals)}. 
+    Rules: Do NOT allocate more than 'amount_needed' to any goal. The sum of all allocated amounts MUST equal exactly ₹{req.amount}.
+    Respond ONLY with a valid JSON array of objects matching this format, with no markdown or backticks:
+    [{{"goal_id": 1, "allocated_amount": 500}}]
     """
     
     try:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        client = genai.Client(api_key=api_key)
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         raw_text = response.text.strip().replace("```json", "").replace("```", "")
         allocations = json.loads(raw_text)
         
-        # Save the money to the database!
         for alloc in allocations:
             if alloc['allocated_amount'] > 0:
-                cursor.execute("INSERT INTO savings_logs (goal_id, amount_saved) VALUES (%s, %s)", 
-                            (alloc['goal_id'], alloc['allocated_amount']))
+                cursor.execute(
+                    "INSERT INTO savings_logs (goal_id, amount_saved) VALUES (%s, %s)", 
+                    (alloc['goal_id'], alloc['allocated_amount'])
+                )
+                
         conn.commit()
         cursor.close()
         conn.close()
         return {"message": f"Successfully split ₹{req.amount} across your goals!"}
-        
     except Exception as e:
-        print(f"Split Error: {e}")
+        print(f"Smart Split Error: {e}")
         cursor.close()
         conn.close()
-        return {"error": "AI could not calculate the split. Try manually adding funds."}
+        return {"error": "AI could not calculate the split."}
+
+@app.post("/api/v1/link/extract-goal")
+def extract_from_link(req: LinkRequest):
+    try:
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        prompt = f"""
+        Analyze this exact product URL: {req.link}
+        Extract the product name, the current price in INR as a float, and find the main high-quality product image URL from the page.
+        Respond ONLY with a valid JSON object matching this exact format, with no markdown, no code blocks:
+        {{"product_name": "Name", "target_price": 0.0, "image_url": "https://..."}}
+        """
+        
+        response = client.models.generate_content(
+            model='gemini-2.5-flash', 
+            contents=prompt,
+            config=types.GenerateContentConfig(tools=[{"google_search": {}}])
+        )
+        
+        raw_text = response.text.strip().replace("```json", "").replace("```", "")
+        return json.loads(raw_text)
+    except Exception as e:
+        print(f"Link AI Error: {e}")
+        return {"error": "Could not read the product link. Please enter details manually."}
+
+@app.get("/api/v1/monitor/{goal_id}")
+def daily_monitor(goal_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT product_name, target_price, product_link FROM goals WHERE goal_id = %s", (goal_id,))
+    goal = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    
+    if not goal:
+        return {"status": "Goal not found."}
+        
+    prompt = f"""
+    I am monitoring a '{goal['product_name']}'. My original target price was ₹{goal['target_price']}. 
+    Here is the exact link: {goal['product_link'] if goal['product_link'] else 'No link provided.'}
+    Search the live internet and check today's market status for this product. Has the price dropped? Is there a new model? 
+    Respond ONLY with a valid JSON object matching this exact format, with no markdown:
+    {{"status": "A 2-sentence daily market update focusing on price drops, sales, or stock status."}}
+    """
+    
+    try:
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        response = client.models.generate_content(
+            model='gemini-2.5-flash', 
+            contents=prompt,
+            config=types.GenerateContentConfig(tools=[{"google_search": {}}])
+        )
+        
+        raw_text = response.text.strip().replace("```json", "").replace("```", "")
+        parsed_data = json.loads(raw_text)
+        return {"status": parsed_data.get("status", "Market is stable today.")}
+    except Exception as e:
+        print(f"Monitor Error: {e}")
+        return {"status": "Could not fetch the daily market update right now."}
