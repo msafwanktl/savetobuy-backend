@@ -5,6 +5,9 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
 from google import genai
+from google.genai import types # NEW: Needed for sending images to Gemini
+import base64 # NEW: For reading the image file
+import json # NEW: For cleaning up the AI's response
 
 app = FastAPI()
 
@@ -61,6 +64,10 @@ class SavingsLogCreate(BaseModel):
 class GoalUpdate(BaseModel):
     product_name: str
     target_price: float
+    
+class ImageRequest(BaseModel):
+    image_base64: str
+    mime_type: str = "image/jpeg"
 
 @app.get("/api/v1/all-goals")
 def get_all_goals():
@@ -232,3 +239,37 @@ def get_prediction(goal_id: int):
     except Exception as e:
         print(f"AI Error: {e}")
         return {"prediction": "Keep depositing consistently so we can predict your timeline!"}
+    
+    # NEW: Snap to Save (Vision AI) Endpoint
+@app.post("/api/v1/vision/extract-goal")
+def extract_goal_from_image(req: ImageRequest):
+    try:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        client = genai.Client(api_key=api_key)
+        
+        # 1. Decode the image string back into actual bytes
+        image_bytes = base64.b64decode(req.image_base64)
+        
+        # 2. Tell Gemini EXACTLY what we want
+        prompt = """
+        Analyze this image. Find the main product being shown and its price. 
+        Respond ONLY with a valid JSON object matching this exact format, with no markdown, no code blocks, and no extra text:
+        {"product_name": "Name of Product", "target_price": 0.0}
+        """
+        
+        # 3. Send both the text prompt and the image to the Vision model
+        response = client.models.generate_content(
+            model='gemini-2.5-flash', 
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=image_bytes, mime_type=req.mime_type)
+            ]
+        )
+        
+        # 4. Clean the response and send it back to the app
+        raw_text = response.text.strip().replace("```json", "").replace("```", "")
+        return json.loads(raw_text)
+        
+    except Exception as e:
+        print(f"Vision AI Error: {e}")
+        return {"error": "Could not read the image. Please enter manually."}
