@@ -273,3 +273,43 @@ def extract_goal_from_image(req: ImageRequest):
     except Exception as e:
         print(f"Vision AI Error: {e}")
         return {"error": "Could not read the image. Please enter manually."}
+    
+    # NEW: The Deal Hunter (Live Search AI) Endpoint
+@app.get("/api/v1/deal-hunter/{goal_id}")
+def find_deals(goal_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    # 1. Get the Goal Info and Current Savings
+    cursor.execute("SELECT product_name, target_price FROM goals WHERE goal_id = %s", (goal_id,))
+    goal = cursor.fetchone()
+    
+    cursor.execute("SELECT SUM(amount_saved) as total FROM savings_logs WHERE goal_id = %s", (goal_id,))
+    logs = cursor.fetchone()
+    current_saved = logs["total"] if logs["total"] else 0
+    
+    cursor.close()
+    conn.close()
+    
+    if not goal:
+        return {"deal": "Goal not found."}
+        
+    # 2. Command Gemini to search the live internet!
+    prompt = f"I am saving for a '{goal['product_name']}'. My original target price was ₹{goal['target_price']}, and I currently have ₹{current_saved} saved. Search the live internet for current prices of this product in India (Amazon, Flipkart, etc.). Write a very brief, exciting 2-sentence response telling me if I can afford it right now with my current savings, or what the lowest price you found is."
+    
+    try:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        client = genai.Client(api_key=api_key)
+        
+        # 3. Give the AI permission to use Google Search
+        response = client.models.generate_content(
+            model='gemini-2.5-flash', 
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[{"google_search": {}}] # This line connects Gemini to the internet!
+            )
+        )
+        return {"deal": response.text.strip()}
+    except Exception as e:
+        print(f"Deal Hunter Error: {e}")
+        return {"deal": "Could not connect to the internet to find deals right now. Keep saving!"}
