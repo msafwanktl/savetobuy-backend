@@ -68,6 +68,9 @@ class GoalUpdate(BaseModel):
 class ImageRequest(BaseModel):
     image_base64: str
     mime_type: str = "image/jpeg"
+    
+class SmartSplitRequest(BaseModel):
+    amount: float
 
 @app.get("/api/v1/all-goals")
 def get_all_goals():
@@ -322,3 +325,103 @@ def find_deals(goal_id: int):
     except Exception as e:
         print(f"Deal Hunter Error: {e}")
         return {"deal": "Could not connect to the internet to find deals right now. Keep saving!", "link": ""}
+    
+    # ==========================================
+# V5.0 AI FEATURE 1: The Dupe Finder
+# ==========================================
+@app.get("/api/v1/dupe-hunter/{goal_id}")
+def find_dupe(goal_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT product_name, target_price FROM goals WHERE goal_id = %s", (goal_id,))
+    goal = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    
+    if not goal:
+        return {"error": "Goal not found."}
+        
+    prompt = f"""
+    I am saving for a '{goal['product_name']}' which costs ₹{goal['target_price']}. 
+    Search the live internet for a highly-rated, significantly cheaper alternative (a "dupe") available in India.
+    Respond ONLY with a valid JSON object matching this exact format, with no markdown or backticks:
+    {{"dupe_name": "Name of the cheaper alternative", "dupe_price": 0.0, "reason": "1-sentence reason why it is a great swap.", "link": "Direct URL to the product"}}
+    """
+    
+    try:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash', 
+            contents=prompt,
+            config=types.GenerateContentConfig(tools=[{"google_search": {}}])
+        )
+        raw_text = response.text.strip().replace("```json", "").replace("```", "")
+        return json.loads(raw_text)
+    except Exception as e:
+        print(f"Dupe Error: {e}")
+        return {"error": "Could not find a cheaper alternative right now."}
+
+# ==========================================
+# V5.0 AI FEATURE 2: Smart Portfolio Split
+# ==========================================
+@app.post("/api/v1/smart-split")
+def smart_split(req: SmartSplitRequest):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    # Get all incomplete goals
+    cursor.execute("SELECT * FROM goals")
+    all_goals = cursor.fetchall()
+    
+    active_goals = []
+    for g in all_goals:
+        cursor.execute("SELECT SUM(amount_saved) as total FROM savings_logs WHERE goal_id = %s", (g['goal_id'],))
+        saved = cursor.fetchone()['total'] or 0
+        if saved < g['target_price']:
+            active_goals.append({
+                "goal_id": g['goal_id'],
+                "product_name": g['product_name'],
+                "target_price": g['target_price'],
+                "current_saved": saved,
+                "amount_needed": g['target_price'] - saved
+            })
+            
+    if not active_goals:
+        cursor.close()
+        conn.close()
+        return {"message": "You have no active goals to fund! Add a new goal first."}
+
+    # Ask Gemini to do the math
+    prompt = f"""
+    I have ₹{req.amount} to deposit right now. Here are my active goals: {json.dumps(active_goals)}. 
+    Act as a financial advisor. Distribute the ₹{req.amount} across these goals. 
+    Mathematical Rules:
+    1. Do NOT allocate more than the 'amount_needed' for any goal.
+    2. The sum of allocations MUST equal exactly ₹{req.amount}.
+    Respond ONLY with a valid JSON array of objects matching this format:
+    [{{"goal_id": 1, "allocated_amount": 500}}, {{"goal_id": 2, "allocated_amount": 500}}]
+    """
+    
+    try:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+        raw_text = response.text.strip().replace("```json", "").replace("```", "")
+        allocations = json.loads(raw_text)
+        
+        # Save the money to the database!
+        for alloc in allocations:
+            if alloc['allocated_amount'] > 0:
+                cursor.execute("INSERT INTO savings_logs (goal_id, amount_saved) VALUES (%s, %s)", 
+                            (alloc['goal_id'], alloc['allocated_amount']))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return {"message": f"Successfully split ₹{req.amount} across your goals!"}
+        
+    except Exception as e:
+        print(f"Split Error: {e}")
+        cursor.close()
+        conn.close()
+        return {"error": "AI could not calculate the split. Try manually adding funds."}
