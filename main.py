@@ -180,7 +180,6 @@ def get_savings_history():
     conn.close()
     return history
 
-
 # ----------------- AI SUPERPOWER ROUTES -----------------
 
 @app.get("/api/v1/coach/{goal_id}")
@@ -203,7 +202,6 @@ def get_ai_coach(goal_id: int):
         response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         return {"advice": response.text.strip()}
     except Exception as e:
-        print(f"Coach Error: {e}")
         return {"advice": "Keep pushing! Every rupee counts towards your goal."}
     
 @app.get("/api/v1/predict/{goal_id}")
@@ -233,7 +231,6 @@ def get_prediction(goal_id: int):
         response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         return {"prediction": response.text.strip()}
     except Exception as e:
-        print(f"Predict Error: {e}")
         return {"prediction": "Keep depositing consistently so we can predict your timeline!"}
 
 @app.post("/api/v1/vision/extract-goal")
@@ -241,22 +238,18 @@ def extract_goal_from_image(req: ImageRequest):
     try:
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         image_bytes = base64.b64decode(req.image_base64)
-        
         prompt = """
         Analyze this image. Find the main product being shown and its price. 
         Respond ONLY with a valid JSON object matching this exact format, with no markdown, no code blocks, and no extra text:
         {"product_name": "Name of Product", "target_price": 0.0}
         """
-        
         response = client.models.generate_content(
             model='gemini-2.5-flash', 
             contents=[prompt, types.Part.from_bytes(data=image_bytes, mime_type=req.mime_type)]
         )
-        
         raw_text = response.text.strip().replace("```json", "").replace("```", "")
         return json.loads(raw_text)
     except Exception as e:
-        print(f"Vision AI Error: {e}")
         return {"error": "Could not read the image."}
 
 @app.get("/api/v1/deal-hunter/{goal_id}")
@@ -265,10 +258,6 @@ def find_deals(goal_id: int):
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute("SELECT product_name, target_price FROM goals WHERE goal_id = %s", (goal_id,))
     goal = cursor.fetchone()
-    
-    cursor.execute("SELECT SUM(amount_saved) as total FROM savings_logs WHERE goal_id = %s", (goal_id,))
-    log_data = cursor.fetchone()
-    current_saved = log_data["total"] if log_data["total"] else 0
     cursor.close()
     conn.close()
     
@@ -285,15 +274,10 @@ def find_deals(goal_id: int):
             contents=prompt, 
             config=types.GenerateContentConfig(tools=[{"google_search": {}}])
         )
-        
         raw_text = response.text.strip().replace("```json", "").replace("```", "")
         parsed_data = json.loads(raw_text)
-        return {
-            "deal": parsed_data.get("deal"), 
-            "link": parsed_data.get("link", "")
-        }
+        return {"deal": parsed_data.get("deal"), "link": parsed_data.get("link", "")}
     except Exception as e:
-        print(f"Deal Hunter Error: {e}")
         return {"deal": "Could not find deals right now.", "link": ""}
 
 @app.get("/api/v1/dupe-hunter/{goal_id}")
@@ -318,11 +302,9 @@ def find_dupe(goal_id: int):
             contents=prompt, 
             config=types.GenerateContentConfig(tools=[{"google_search": {}}])
         )
-        
         raw_text = response.text.strip().replace("```json", "").replace("```", "")
         return json.loads(raw_text)
     except Exception as e:
-        print(f"Dupe Error: {e}")
         return {"error": "Could not find a cheaper alternative right now."}
 
 @app.post("/api/v1/smart-split")
@@ -366,17 +348,12 @@ def smart_split(req: SmartSplitRequest):
         
         for alloc in allocations:
             if alloc['allocated_amount'] > 0:
-                cursor.execute(
-                    "INSERT INTO savings_logs (goal_id, amount_saved) VALUES (%s, %s)", 
-                    (alloc['goal_id'], alloc['allocated_amount'])
-                )
-                
+                cursor.execute("INSERT INTO savings_logs (goal_id, amount_saved) VALUES (%s, %s)", (alloc['goal_id'], alloc['allocated_amount']))
         conn.commit()
         cursor.close()
         conn.close()
         return {"message": f"Successfully split ₹{req.amount} across your goals!"}
     except Exception as e:
-        print(f"Smart Split Error: {e}")
         cursor.close()
         conn.close()
         return {"error": "AI could not calculate the split."}
@@ -386,29 +363,27 @@ def extract_from_link(req: LinkRequest):
     try:
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         prompt = f"""
-        Analyze this exact product URL: {req.link}
-        Extract the product name, the current price in INR as a float, and find the main high-quality product image URL from the page.
+        The user wants to buy the product found at this link: {req.link}
+        Use Google Search to find out what this product is, its current price in INR, and find a direct public image URL (.jpg or .png) of this product.
+        If you cannot find an image URL, return an empty string "".
         Respond ONLY with a valid JSON object matching this exact format, with no markdown, no code blocks:
         {{"product_name": "Name", "target_price": 0.0, "image_url": "https://..."}}
         """
-        
         response = client.models.generate_content(
             model='gemini-2.5-flash', 
             contents=prompt,
             config=types.GenerateContentConfig(tools=[{"google_search": {}}])
         )
-        
         raw_text = response.text.strip().replace("```json", "").replace("```", "")
         return json.loads(raw_text)
     except Exception as e:
-        print(f"Link AI Error: {e}")
-        return {"error": "Could not read the product link. Please enter details manually."}
+        return {"error": "Could not read the product link due to security blocks. Please enter details manually."}
 
 @app.get("/api/v1/monitor/{goal_id}")
 def daily_monitor(goal_id: int):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("SELECT product_name, target_price, product_link FROM goals WHERE goal_id = %s", (goal_id,))
+    cursor.execute("SELECT product_name, target_price FROM goals WHERE goal_id = %s", (goal_id,))
     goal = cursor.fetchone()
     cursor.close()
     conn.close()
@@ -417,9 +392,9 @@ def daily_monitor(goal_id: int):
         return {"status": "Goal not found."}
         
     prompt = f"""
-    I am monitoring a '{goal['product_name']}'. My original target price was ₹{goal['target_price']}. 
-    Here is the exact link: {goal['product_link'] if goal['product_link'] else 'No link provided.'}
-    Search the live internet and check today's market status for this product. Has the price dropped? Is there a new model? 
+    I am saving up for a '{goal['product_name']}'. My original target price was ₹{goal['target_price']}. 
+    Search Google for the current market status and pricing of '{goal['product_name']}' in India today (Amazon, Flipkart, News).
+    Has the price dropped? Is there a flash sale? 
     Respond ONLY with a valid JSON object matching this exact format, with no markdown:
     {{"status": "A 2-sentence daily market update focusing on price drops, sales, or stock status."}}
     """
@@ -431,10 +406,8 @@ def daily_monitor(goal_id: int):
             contents=prompt,
             config=types.GenerateContentConfig(tools=[{"google_search": {}}])
         )
-        
         raw_text = response.text.strip().replace("```json", "").replace("```", "")
         parsed_data = json.loads(raw_text)
         return {"status": parsed_data.get("status", "Market is stable today.")}
     except Exception as e:
-        print(f"Monitor Error: {e}")
         return {"status": "Could not fetch the daily market update right now."}
