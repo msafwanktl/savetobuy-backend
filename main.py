@@ -411,3 +411,36 @@ def daily_monitor(goal_id: int):
         return {"status": parsed_data.get("status", "Market is stable today.")}
     except Exception as e:
         return {"status": "Could not fetch the daily market update right now."}
+    
+@app.get("/api/v1/stock-check/{goal_id}")
+def check_stock(goal_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT product_name, product_link FROM goals WHERE goal_id = %s", (goal_id,))
+    goal = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    
+    if not goal:
+        return {"error": "Goal not found."}
+        
+    prompt = f"""
+    Search the live internet for the current stock availability of '{goal['product_name']}' in India.
+    If this link is provided, prioritize checking it: {goal.get('product_link', 'No specific link provided')}.
+    Is it currently in stock, out of stock, or low in stock?
+    Respond ONLY with a valid JSON object matching this exact format, with no markdown:
+    {{"status": "IN_STOCK" or "OUT_OF_STOCK" or "UNKNOWN", "message": "1-sentence explanation."}}
+    """
+    
+    try:
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        response = client.models.generate_content(
+            model='gemini-2.5-flash', 
+            contents=prompt,
+            config=types.GenerateContentConfig(tools=[{"google_search": {}}])
+        )
+        raw_text = response.text.strip().replace("```json", "").replace("```", "")
+        parsed_data = json.loads(raw_text)
+        return parsed_data
+    except Exception as e:
+        return {"status": "UNKNOWN", "message": "Could not verify stock right now."}
