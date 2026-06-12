@@ -47,8 +47,6 @@ def startup():
     cursor.close()
     conn.close()
 
-# ----------------- PYDANTIC MODELS -----------------
-
 class GoalCreate(BaseModel):
     product_name: str
     target_price: float
@@ -74,8 +72,6 @@ class SmartSplitRequest(BaseModel):
 
 class LinkRequest(BaseModel):
     link: str
-
-# ----------------- CORE ROUTES -----------------
 
 @app.get("/api/v1/dashboard-stats")
 def get_dashboard_stats():
@@ -197,8 +193,6 @@ def get_savings_history():
     cursor.close()
     conn.close()
     return history
-
-# ----------------- AI ENDPOINTS -----------------
 
 @app.get("/api/v1/deal-radar")
 def run_deal_radar():
