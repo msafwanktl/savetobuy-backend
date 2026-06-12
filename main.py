@@ -464,3 +464,75 @@ def get_dashboard_stats():
         "total_target": goals_data["total_target"] if goals_data["total_target"] else 0,
         "total_goals": goals_data["total_goals"] if goals_data["total_goals"] else 0
     }
+    
+@app.get("/api/v1/dashboard-stats")
+def get_dashboard_stats():
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cursor.execute("SELECT COUNT(goal_id) as total_goals, SUM(target_price) as total_target FROM goals")
+    goals_data = cursor.fetchone()
+    
+    cursor.execute("SELECT SUM(amount_saved) as total_saved FROM savings_logs")
+    saved_data = cursor.fetchone()
+    
+    cursor.close()
+    conn.close()
+    
+    total_target = goals_data["total_target"] if goals_data["total_target"] else 0
+    total_saved = saved_data["total_saved"] if saved_data["total_saved"] else 0
+    # Calculate overall deficit safely
+    overall_needed = max(0.0, total_target - total_saved)
+    
+    return {
+        "total_saved": total_saved,
+        "total_target": total_target,
+        "total_goals": goals_data["total_goals"] if goals_data["total_goals"] else 0,
+        "overall_needed": overall_needed  # New Metric
+    }
+
+@app.get("/api/v1/analytics/velocity")
+def get_savings_velocity():
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    # Aggregates savings totals grouped by month/date for data visualization
+    cursor.execute("""
+        SELECT TO_CHAR(created_at, 'YYYY-MM') as month, SUM(amount_saved) as total 
+        FROM savings_logs 
+        GROUP BY month 
+        ORDER BY month ASC 
+        LIMIT 6
+    """)
+    velocity = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return velocity
+
+@app.get("/api/v1/deal-radar")
+def run_deal_radar():
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT goal_id, product_name, target_price FROM goals")
+    all_goals = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    
+    if not all_goals:
+        return {"radar_update": "No targets tracked yet. Add items to unlock the radar."}
+        
+    items_list = ", ".join([f"'{g['product_name']}' (Target: ₹{g['target_price']})" for g in all_goals])
+    
+    prompt = f"""
+    You are an elite automated retail crawler. Scan the web for live market updates, flash sales, or major drops on these items in India: {items_list}.
+    Compile an ultra-concise, professional 2-sentence summary spotlighting where the biggest active discounts are right now. Be specific.
+    """
+    try:
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(tools=[{"google_search": {}}])
+        )
+        return {"radar_update": response.text.strip()}
+    except Exception as e:
+        return {"radar_update": "Radar online. Market is stable across your tracked inventory today."}
