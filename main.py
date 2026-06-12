@@ -444,3 +444,23 @@ def check_stock(goal_id: int):
         return parsed_data
     except Exception as e:
         return {"status": "UNKNOWN", "message": "Could not verify stock right now."}
+    
+@app.get("/api/v1/dashboard-stats")
+def get_dashboard_stats():
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cursor.execute("SELECT COUNT(goal_id) as total_goals, SUM(target_price) as total_target FROM goals")
+    goals_data = cursor.fetchone()
+    
+    cursor.execute("SELECT SUM(amount_saved) as total_saved FROM savings_logs")
+    saved_data = cursor.fetchone()
+    
+    cursor.close()
+    conn.close()
+    
+    return {
+        "total_saved": saved_data["total_saved"] if saved_data["total_saved"] else 0,
+        "total_target": goals_data["total_target"] if goals_data["total_target"] else 0,
+        "total_goals": goals_data["total_goals"] if goals_data["total_goals"] else 0
+    }
