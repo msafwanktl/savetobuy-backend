@@ -346,12 +346,19 @@ def smart_split(req: SmartSplitRequest):
 def extract_from_link(req: LinkRequest):
     try:
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-        prompt = f"The user wants to buy the product found at this link: {req.link}. Use Google Search to find out what this product is, its current price in INR, and find a direct public image URL (.jpg or .png) of this product. Respond ONLY with a valid JSON object matching this exact format, with no markdown: {{\"product_name\": \"Name\", \"target_price\": 0.0, \"image_url\": \"https://...\"}}"
+        prompt = f"""
+        The user provided this exact product link: {req.link}.
+        WARNING: Do NOT guess or return a random recommended product. 
+        1. First, analyze the URL structure. If it is an Amazon link, extract the exact ASIN (the 10-character code usually found after '/dp/' or '/gp/product/'). If it's another store, extract the exact product slug from the URL.
+        2. Use Google Search to look up THAT specific ASIN or exact product slug for the Indian market (INR).
+        3. Find the exact product name, current price in INR, and a direct image URL for that specific item.
+        Respond ONLY with a valid JSON object matching this exact format, with no markdown: {{"product_name": "Exact Item Name", "target_price": 0.0, "image_url": "https://..."}}
+        """
         response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt, config=types.GenerateContentConfig(tools=[{"google_search": {}}]))
-        raw_text = response.text.strip().replace("```json", "").replace("```", "")
+        raw_text = response.text.strip().replace("```json", "").replace("``", "")
         return json.loads(raw_text)
     except Exception as e:
-        return {"error": "Could not read the product link due to security blocks. Please enter details manually."}
+        return {"error": "Could not securely parse the product link. Please enter details manually."}
 
 @app.get("/api/v1/monitor/{goal_id}")
 def daily_monitor(goal_id: int):
