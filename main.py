@@ -27,22 +27,24 @@ def startup():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # WealthRadar Tables
+    # --- WEALTHRADAR TABLES ---
     cursor.execute('''CREATE TABLE IF NOT EXISTS goals (goal_id SERIAL PRIMARY KEY, product_name TEXT, target_price REAL)''')
     cursor.execute('ALTER TABLE goals ADD COLUMN IF NOT EXISTS image_url TEXT')
     cursor.execute('ALTER TABLE goals ADD COLUMN IF NOT EXISTS product_link TEXT')
     cursor.execute('''CREATE TABLE IF NOT EXISTS savings_logs (log_id SERIAL PRIMARY KEY, goal_id INTEGER, amount_saved REAL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
-    # Energy Saver Tables
+    # --- ENERGY SAVER TABLES ---
     cursor.execute('''CREATE TABLE IF NOT EXISTS appliances (
         appliance_id SERIAL PRIMARY KEY,
         appliance_name TEXT,
-        watts REAL,
-        min_hours REAL,
-        max_hours REAL
+        watts REAL
     )''')
     
-    # NEW: Daily Timetable Logs
+    # Auto-healing: Add the new columns if they are missing from the older version
+    cursor.execute('ALTER TABLE appliances ADD COLUMN IF NOT EXISTS min_hours REAL DEFAULT 0')
+    cursor.execute('ALTER TABLE appliances ADD COLUMN IF NOT EXISTS max_hours REAL DEFAULT 0')
+    
+    # Daily Timetable Logs
     cursor.execute('''CREATE TABLE IF NOT EXISTS appliance_logs (
         log_id SERIAL PRIMARY KEY,
         appliance_id INTEGER,
