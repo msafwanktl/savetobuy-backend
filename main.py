@@ -38,7 +38,8 @@ def startup():
         appliance_id SERIAL PRIMARY KEY,
         appliance_name TEXT,
         watts REAL,
-        daily_hours REAL
+        min_hours REAL,
+        max_hours REAL
     )''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS electricity_logs (
         log_id SERIAL PRIMARY KEY,
