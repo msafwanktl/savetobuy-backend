@@ -40,7 +40,6 @@ def startup():
         room_name TEXT DEFAULT 'General'
     )''')
     
-    # Auto-heal room column if missing
     cursor.execute("ALTER TABLE appliances ADD COLUMN IF NOT EXISTS room_name TEXT DEFAULT 'General'")
     
     # Daily Timetable Logs
@@ -250,6 +249,47 @@ def get_live_meter(rate: float = 6.50):
     total_units = round(result['total_units'], 2)
     total_bill = round(total_units * rate, 2)
     return {"accumulated_units": total_units, "current_bill": total_bill}
+
+@app.get("/api/v1/energy/room-summary")
+def get_room_summary():
+    conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("""
+        SELECT a.room_name, COALESCE(SUM((a.watts * l.hours_used) / 1000.0), 0) as total_units
+        FROM appliance_logs l
+        JOIN appliances a ON l.appliance_id = a.appliance_id
+        WHERE EXTRACT(MONTH FROM l.log_date) = EXTRACT(MONTH FROM CURRENT_DATE)
+          AND EXTRACT(YEAR FROM l.log_date) = EXTRACT(YEAR FROM CURRENT_DATE)
+        GROUP BY a.room_name
+        ORDER BY total_units DESC
+    """)
+    summary = cursor.fetchall()
+    cursor.close(); conn.close()
+    
+    for row in summary:
+        row['total_units'] = round(row['total_units'], 2)
+    return summary
+
+# NEW: Daily History Route
+@app.get("/api/v1/energy/daily-history")
+def get_daily_history():
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("""
+        SELECT TO_CHAR(l.log_date, 'YYYY-MM-DD') as log_date, 
+               COALESCE(SUM((a.watts * l.hours_used) / 1000.0), 0) as daily_units
+        FROM appliance_logs l
+        JOIN appliances a ON l.appliance_id = a.appliance_id
+        WHERE EXTRACT(MONTH FROM l.log_date) = EXTRACT(MONTH FROM CURRENT_DATE)
+          AND EXTRACT(YEAR FROM l.log_date) = EXTRACT(YEAR FROM CURRENT_DATE)
+        GROUP BY l.log_date
+        ORDER BY l.log_date DESC
+    """)
+    history = cursor.fetchall()
+    cursor.close(); conn.close()
+    
+    for row in history:
+        row['daily_units'] = round(row['daily_units'], 2)
+    return history
 
 @app.post("/api/v1/appliances")
 def add_appliance(app: ApplianceCreate):
