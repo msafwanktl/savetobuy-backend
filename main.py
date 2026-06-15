@@ -40,9 +40,10 @@ def startup():
         watts REAL
     )''')
     
-    # Auto-healing: Add the new columns if they are missing from the older version
+    # Auto-healing: Add new columns if they are missing
     cursor.execute('ALTER TABLE appliances ADD COLUMN IF NOT EXISTS min_hours REAL DEFAULT 0')
     cursor.execute('ALTER TABLE appliances ADD COLUMN IF NOT EXISTS max_hours REAL DEFAULT 0')
+    cursor.execute("ALTER TABLE appliances ADD COLUMN IF NOT EXISTS room_name TEXT DEFAULT 'General'")
     
     # Daily Timetable Logs
     cursor.execute('''CREATE TABLE IF NOT EXISTS appliance_logs (
@@ -91,6 +92,7 @@ class ApplianceCreate(BaseModel):
     watts: float
     min_hours: float
     max_hours: float
+    room_name: str
 
 class ElectricityLogCreate(BaseModel):
     prev_reading: float
@@ -242,13 +244,12 @@ def get_appliances():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     
-    # Fetch appliances AND today's logged hours (if any)
     cursor.execute("""
-        SELECT a.appliance_id, a.appliance_name, a.watts, a.min_hours, a.max_hours, 
+        SELECT a.appliance_id, a.appliance_name, a.watts, a.min_hours, a.max_hours, a.room_name,
                COALESCE(l.hours_used, 0) as today_hours 
         FROM appliances a 
         LEFT JOIN appliance_logs l ON a.appliance_id = l.appliance_id AND l.log_date = CURRENT_DATE
-        ORDER BY a.watts DESC
+        ORDER BY a.room_name ASC, a.watts DESC
     """)
     apps = cursor.fetchall()
     
@@ -262,7 +263,6 @@ def get_appliances():
 @app.post("/api/v1/energy/today")
 def update_daily_log(log: DailyLogUpdate):
     conn = get_db_connection(); cursor = conn.cursor()
-    # Upsert: Insert new log for today, or update if it already exists
     cursor.execute("""
         INSERT INTO appliance_logs (appliance_id, log_date, hours_used) 
         VALUES (%s, CURRENT_DATE, %s) 
@@ -275,7 +275,6 @@ def update_daily_log(log: DailyLogUpdate):
 @app.get("/api/v1/energy/live-meter")
 def get_live_meter(rate: float = 6.50):
     conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
-    # Sum up all usage for the current month
     cursor.execute("""
         SELECT COALESCE(SUM((a.watts * l.hours_used) / 1000.0), 0) as total_units
         FROM appliance_logs l
@@ -293,8 +292,9 @@ def get_live_meter(rate: float = 6.50):
 @app.post("/api/v1/appliances")
 def add_appliance(app: ApplianceCreate):
     conn = get_db_connection(); cursor = conn.cursor()
-    cursor.execute("INSERT INTO appliances (appliance_name, watts, min_hours, max_hours) VALUES (%s, %s, %s, %s)", 
-                   (app.appliance_name, app.watts, app.min_hours, app.max_hours))
+    room = app.room_name.strip() if app.room_name else "General"
+    cursor.execute("INSERT INTO appliances (appliance_name, watts, min_hours, max_hours, room_name) VALUES (%s, %s, %s, %s, %s)", 
+                   (app.appliance_name, app.watts, app.min_hours, app.max_hours, room))
     conn.commit(); cursor.close(); conn.close()
     return {"message": "Appliance added!"}
 
