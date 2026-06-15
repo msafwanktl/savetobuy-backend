@@ -4,7 +4,6 @@ from pydantic import BaseModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
-import base64
 import json
 from google import genai
 from google.genai import types
@@ -27,22 +26,21 @@ def startup():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # --- WEALTHRADAR TABLES ---
+    # WealthRadar Tables
     cursor.execute('''CREATE TABLE IF NOT EXISTS goals (goal_id SERIAL PRIMARY KEY, product_name TEXT, target_price REAL)''')
     cursor.execute('ALTER TABLE goals ADD COLUMN IF NOT EXISTS image_url TEXT')
     cursor.execute('ALTER TABLE goals ADD COLUMN IF NOT EXISTS product_link TEXT')
     cursor.execute('''CREATE TABLE IF NOT EXISTS savings_logs (log_id SERIAL PRIMARY KEY, goal_id INTEGER, amount_saved REAL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
-    # --- ENERGY SAVER TABLES ---
+    # Energy Saver Tables
     cursor.execute('''CREATE TABLE IF NOT EXISTS appliances (
         appliance_id SERIAL PRIMARY KEY,
         appliance_name TEXT,
-        watts REAL
+        watts REAL,
+        room_name TEXT DEFAULT 'General'
     )''')
     
-    # Auto-healing: Add new columns if they are missing
-    cursor.execute('ALTER TABLE appliances ADD COLUMN IF NOT EXISTS min_hours REAL DEFAULT 0')
-    cursor.execute('ALTER TABLE appliances ADD COLUMN IF NOT EXISTS max_hours REAL DEFAULT 0')
+    # Auto-heal room column if missing
     cursor.execute("ALTER TABLE appliances ADD COLUMN IF NOT EXISTS room_name TEXT DEFAULT 'General'")
     
     # Daily Timetable Logs
@@ -77,21 +75,13 @@ class GoalUpdate(BaseModel):
 
 class SavingsLogCreate(BaseModel):
     goal_id: int; amount_saved: float
-    
-class ImageRequest(BaseModel):
-    image_base64: str; mime_type: str = "image/jpeg"
 
 class SmartSplitRequest(BaseModel):
     amount: float
 
-class LinkRequest(BaseModel):
-    link: str
-
 class ApplianceCreate(BaseModel):
     appliance_name: str
     watts: float
-    min_hours: float
-    max_hours: float
     room_name: str
 
 class ElectricityLogCreate(BaseModel):
@@ -103,7 +93,7 @@ class DailyLogUpdate(BaseModel):
     appliance_id: int
     hours_used: float
 
-# ----------------- EXISTING ROUTES -----------------
+# ----------------- WEALTHRADAR ROUTES -----------------
 
 @app.get("/api/v1/dashboard-stats")
 def get_dashboard_stats():
@@ -168,15 +158,6 @@ def edit_goal(goal_id: int, goal: GoalUpdate):
     conn.commit(); cursor.close(); conn.close()
     return {"message": "Goal updated!"}
 
-@app.get("/api/v1/history")
-def get_savings_history():
-    conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute('SELECT logs.log_id, logs.amount_saved, logs.created_at, goals.product_name FROM savings_logs logs JOIN goals ON logs.goal_id = goals.goal_id ORDER BY logs.log_id DESC')
-    logs = cursor.fetchall()
-    history = [{"id": l["log_id"], "amount": l["amount_saved"], "date": str(l["created_at"])[:16], "product": l["product_name"]} for l in logs]
-    cursor.close(); conn.close()
-    return history
-
 @app.post("/api/v1/smart-split")
 def smart_split(req: SmartSplitRequest):
     conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -223,21 +204,7 @@ def run_deal_radar():
     except Exception:
         return {"radar_update": "Market is stable today."}
 
-# Boilerplate fallbacks for unused routes
-@app.get("/api/v1/coach/{goal_id}")
-def get_ai_coach(goal_id: int): return {"advice": "Keep pushing!"}
-@app.get("/api/v1/predict/{goal_id}")
-def get_prediction(goal_id: int): return {"prediction": "Keep depositing!"}
-@app.get("/api/v1/monitor/{goal_id}")
-def daily_monitor(goal_id: int): return {"status": "Market stable."}
-@app.get("/api/v1/deal-hunter/{goal_id}")
-def find_deals(goal_id: int): return {"deal": "No deals.", "link": ""}
-@app.get("/api/v1/dupe-hunter/{goal_id}")
-def find_dupe(goal_id: int): return {"error": "No dupes."}
-@app.get("/api/v1/stock-check/{goal_id}")
-def check_stock(goal_id: int): return {"status": "UNKNOWN", "message": "Verify manually."}
-
-# ----------------- NEW: ENERGY SAVER ROUTES -----------------
+# ----------------- ENERGY SAVER ROUTES -----------------
 
 @app.get("/api/v1/appliances")
 def get_appliances():
@@ -245,18 +212,13 @@ def get_appliances():
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     
     cursor.execute("""
-        SELECT a.appliance_id, a.appliance_name, a.watts, a.min_hours, a.max_hours, a.room_name,
+        SELECT a.appliance_id, a.appliance_name, a.watts, a.room_name,
                COALESCE(l.hours_used, 0) as today_hours 
         FROM appliances a 
         LEFT JOIN appliance_logs l ON a.appliance_id = l.appliance_id AND l.log_date = CURRENT_DATE
         ORDER BY a.room_name ASC, a.watts DESC
     """)
     apps = cursor.fetchall()
-    
-    for app in apps:
-        app['min_monthly_units'] = round((app['watts'] * app['min_hours'] * 30.44) / 1000, 2)
-        app['max_monthly_units'] = round((app['watts'] * app['max_hours'] * 30.44) / 1000, 2)
-        
     cursor.close(); conn.close()
     return apps
 
@@ -293,8 +255,8 @@ def get_live_meter(rate: float = 6.50):
 def add_appliance(app: ApplianceCreate):
     conn = get_db_connection(); cursor = conn.cursor()
     room = app.room_name.strip() if app.room_name else "General"
-    cursor.execute("INSERT INTO appliances (appliance_name, watts, min_hours, max_hours, room_name) VALUES (%s, %s, %s, %s, %s)", 
-                   (app.appliance_name, app.watts, app.min_hours, app.max_hours, room))
+    cursor.execute("INSERT INTO appliances (appliance_name, watts, room_name) VALUES (%s, %s, %s)", 
+                   (app.appliance_name, app.watts, room))
     conn.commit(); cursor.close(); conn.close()
     return {"message": "Appliance added!"}
 
@@ -319,18 +281,22 @@ def calculate_bill(log: ElectricityLogCreate):
 @app.get("/api/v1/energy/coach")
 def energy_coach(units: float, bill: float, rate: float):
     conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("SELECT * FROM appliances")
+    cursor.execute("""
+        SELECT a.appliance_name, a.watts, COALESCE(SUM(l.hours_used), 0) as month_hours
+        FROM appliances a
+        LEFT JOIN appliance_logs l ON a.appliance_id = l.appliance_id 
+        AND EXTRACT(MONTH FROM l.log_date) = EXTRACT(MONTH FROM CURRENT_DATE)
+        GROUP BY a.appliance_id
+    """)
     apps = cursor.fetchall()
     cursor.close(); conn.close()
     
-    theo_max = sum(((a['watts'] * a['max_hours'] * 30.44) / 1000) for a in apps)
-    app_list = ", ".join([f"{a['appliance_name']} ({a['watts']}W, max {a['max_hours']}h/day)" for a in apps])
+    app_list = ", ".join([f"{a['appliance_name']} ({a['watts']}W, logged {round(a['month_hours'],1)}h this month)" for a in apps])
     
     prompt = f"""
-    The user lives in Kerala (KSEB). Appliances: {app_list}.
-    Max expected usage: {round(theo_max, 1)} units.
-    Actual billed: {units} units (₹{bill} at ₹{rate}/unit).
-    Give 3 high-impact bullet points to reduce this bill. 
+    The user lives in Kerala (KSEB). They logged these appliances this month: {app_list}.
+    Their actual KSEB billed usage: {units} units (₹{bill} at ₹{rate}/unit).
+    Give 3 high-impact bullet points to reduce this bill based on their logged devices. 
     Format response strictly as a JSON array of 3 strings. Example: ["Tip 1", "Tip 2", "Tip 3"]
     """
     try:
@@ -338,6 +304,6 @@ def energy_coach(units: float, bill: float, rate: float):
         response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         raw_text = response.text.strip().replace("```json", "").replace("```", "")
         tips = json.loads(raw_text)
-        return {"tips": tips, "theoretical_units": round(theo_max, 1)}
+        return {"tips": tips}
     except Exception:
-        return {"tips": ["Turn off phantom loads.", "Clean AC filters.", "Switch to LED bulbs."], "theoretical_units": round(theo_max, 1)}
+        return {"tips": ["Turn off phantom loads.", "Clean AC filters.", "Switch to LED bulbs."]}
