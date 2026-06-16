@@ -39,10 +39,8 @@ def startup():
         watts REAL,
         room_name TEXT DEFAULT 'General'
     )''')
-    
     cursor.execute("ALTER TABLE appliances ADD COLUMN IF NOT EXISTS room_name TEXT DEFAULT 'General'")
     
-    # Daily Timetable Logs
     cursor.execute('''CREATE TABLE IF NOT EXISTS appliance_logs (
         log_id SERIAL PRIMARY KEY,
         appliance_id INTEGER,
@@ -59,6 +57,12 @@ def startup():
         total_bill REAL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
+
+    cursor.execute('''CREATE TABLE IF NOT EXISTS solar_installations (
+        id SERIAL PRIMARY KEY,
+        capacity_kw REAL,
+        daily_yield_per_kw REAL DEFAULT 4.0
+    )''')
     
     conn.commit()
     cursor.close()
@@ -66,31 +70,15 @@ def startup():
 
 # ----------------- PYDANTIC MODELS -----------------
 
-class GoalCreate(BaseModel):
-    product_name: str; target_price: float; image_url: str = ""; product_link: str = ""
-
-class GoalUpdate(BaseModel):
-    product_name: str; target_price: float; image_url: str = ""; product_link: str = ""
-
-class SavingsLogCreate(BaseModel):
-    goal_id: int; amount_saved: float
-
-class SmartSplitRequest(BaseModel):
-    amount: float
-
-class ApplianceCreate(BaseModel):
-    appliance_name: str
-    watts: float
-    room_name: str
-
-class ElectricityLogCreate(BaseModel):
-    prev_reading: float
-    curr_reading: float
-    rate_per_unit: float
-
-class DailyLogUpdate(BaseModel):
-    appliance_id: int
-    hours_used: float
+class GoalCreate(BaseModel): product_name: str; target_price: float; image_url: str = ""; product_link: str = ""
+class GoalUpdate(BaseModel): product_name: str; target_price: float; image_url: str = ""; product_link: str = ""
+class SavingsLogCreate(BaseModel): goal_id: int; amount_saved: float
+class SmartSplitRequest(BaseModel): amount: float
+class ApplianceCreate(BaseModel): appliance_name: str; watts: float; room_name: str
+class ApplianceUpdate(BaseModel): appliance_name: str; watts: float; room_name: str
+class ElectricityLogCreate(BaseModel): prev_reading: float; curr_reading: float; rate_per_unit: float
+class DailyLogUpdate(BaseModel): appliance_id: int; hours_used: float
+class SolarCreate(BaseModel): capacity_kw: float; daily_yield_per_kw: float = 4.0
 
 # ----------------- WEALTHRADAR ROUTES -----------------
 
@@ -172,7 +160,7 @@ def smart_split(req: SmartSplitRequest):
     if len(active_goals) == 0: 
         cursor.close(); conn.close()
         return {"message": "You have no active goals to fund!"}
-    prompt = f"Distribute ₹{req.amount} across these goals: {json.dumps(active_goals)}. Rules: Do NOT allocate more than 'amount_needed' to any goal. Sum MUST equal exactly ₹{req.amount}. Respond ONLY with a valid JSON array matching this format: [{{\"goal_id\": 1, \"allocated_amount\": 500}}]"
+    prompt = f"Distribute ₹{req.amount} across these goals: {json.dumps(active_goals)}. Rules: Do NOT allocate more than 'amount_needed'. Sum MUST equal exactly ₹{req.amount}. Respond ONLY with a valid JSON array matching this format: [{{\"goal_id\": 1, \"allocated_amount\": 500}}]"
     try:
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
@@ -209,7 +197,6 @@ def run_deal_radar():
 def get_appliances():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    
     cursor.execute("""
         SELECT a.appliance_id, a.appliance_name, a.watts, a.room_name,
                COALESCE(l.hours_used, 0) as today_hours 
@@ -233,22 +220,61 @@ def update_daily_log(log: DailyLogUpdate):
     conn.commit(); cursor.close(); conn.close()
     return {"message": "Timetable updated."}
 
+@app.get("/api/v1/energy/solar")
+def get_solar_config():
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT capacity_kw, daily_yield_per_kw FROM solar_installations LIMIT 1")
+    config = cursor.fetchone()
+    cursor.close(); conn.close()
+    if config: return config
+    return {"capacity_kw": 0.0, "daily_yield_per_kw": 4.0}
+
+@app.post("/api/v1/energy/solar")
+def set_solar_config(solar: SolarCreate):
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("DELETE FROM solar_installations")
+    cursor.execute("INSERT INTO solar_installations (capacity_kw, daily_yield_per_kw) VALUES (%s, %s)", 
+                   (solar.capacity_kw, solar.daily_yield_per_kw))
+    conn.commit(); cursor.close(); conn.close()
+    return {"message": "Solar array configured!"}
+
 @app.get("/api/v1/energy/live-meter")
 def get_live_meter(rate: float = 6.50):
     conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute("""
-        SELECT COALESCE(SUM((a.watts * l.hours_used) / 1000.0), 0) as total_units
+        SELECT COALESCE(SUM((a.watts * l.hours_used) / 1000.0), 0) as gross_units
         FROM appliance_logs l
         JOIN appliances a ON l.appliance_id = a.appliance_id
         WHERE EXTRACT(MONTH FROM l.log_date) = EXTRACT(MONTH FROM CURRENT_DATE)
           AND EXTRACT(YEAR FROM l.log_date) = EXTRACT(YEAR FROM CURRENT_DATE)
     """)
-    result = cursor.fetchone()
+    gross_units = cursor.fetchone()['gross_units']
+    
+    cursor.execute("SELECT EXTRACT(DAY FROM CURRENT_DATE) as days_passed")
+    days_passed = cursor.fetchone()['days_passed']
+    
+    cursor.execute("SELECT capacity_kw, daily_yield_per_kw FROM solar_installations LIMIT 1")
+    solar_conf = cursor.fetchone()
+    solar_units = 0.0
+    if solar_conf:
+        solar_units = solar_conf['capacity_kw'] * solar_conf['daily_yield_per_kw'] * days_passed
+
     cursor.close(); conn.close()
     
-    total_units = round(result['total_units'], 2)
-    total_bill = round(total_units * rate, 2)
-    return {"accumulated_units": total_units, "current_bill": total_bill}
+    gross_units = round(gross_units, 2)
+    solar_units = round(solar_units, 2)
+    net_units = round(gross_units - solar_units, 2)
+    current_bill = round(net_units * rate, 2) if net_units > 0 else 0.0
+    solar_savings = round(solar_units * rate, 2)
+    
+    return {
+        "gross_units": gross_units, 
+        "solar_units": solar_units,
+        "net_units": net_units,
+        "current_bill": current_bill,
+        "solar_savings_rs": solar_savings
+    }
 
 @app.get("/api/v1/energy/room-summary")
 def get_room_summary():
@@ -264,12 +290,9 @@ def get_room_summary():
     """)
     summary = cursor.fetchall()
     cursor.close(); conn.close()
-    
-    for row in summary:
-        row['total_units'] = round(row['total_units'], 2)
+    for row in summary: row['total_units'] = round(row['total_units'], 2)
     return summary
 
-# NEW: Daily History Route
 @app.get("/api/v1/energy/daily-history")
 def get_daily_history():
     conn = get_db_connection()
@@ -286,9 +309,7 @@ def get_daily_history():
     """)
     history = cursor.fetchall()
     cursor.close(); conn.close()
-    
-    for row in history:
-        row['daily_units'] = round(row['daily_units'], 2)
+    for row in history: row['daily_units'] = round(row['daily_units'], 2)
     return history
 
 @app.post("/api/v1/appliances")
@@ -299,6 +320,14 @@ def add_appliance(app: ApplianceCreate):
                    (app.appliance_name, app.watts, room))
     conn.commit(); cursor.close(); conn.close()
     return {"message": "Appliance added!"}
+
+@app.put("/api/v1/appliances/{app_id}")
+def update_appliance(app_id: int, app: ApplianceUpdate):
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("UPDATE appliances SET appliance_name = %s, watts = %s, room_name = %s WHERE appliance_id = %s", 
+                   (app.appliance_name, app.watts, app.room_name, app_id))
+    conn.commit(); cursor.close(); conn.close()
+    return {"message": "Appliance updated successfully!"}
 
 @app.delete("/api/v1/appliances/{app_id}")
 def delete_appliance(app_id: int):
@@ -329,21 +358,37 @@ def energy_coach(units: float, bill: float, rate: float):
         GROUP BY a.appliance_id
     """)
     apps = cursor.fetchall()
+    
+    cursor.execute("SELECT capacity_kw FROM solar_installations LIMIT 1")
+    solar = cursor.fetchone()
     cursor.close(); conn.close()
     
+    solar_str = f"User also has a {solar['capacity_kw']}kW solar array." if solar and solar['capacity_kw'] > 0 else ""
     app_list = ", ".join([f"{a['appliance_name']} ({a['watts']}W, logged {round(a['month_hours'],1)}h this month)" for a in apps])
     
     prompt = f"""
-    The user lives in Kerala (KSEB). They logged these appliances this month: {app_list}.
-    Their actual KSEB billed usage: {units} units (₹{bill} at ₹{rate}/unit).
-    Give 3 high-impact bullet points to reduce this bill based on their logged devices. 
-    Format response strictly as a JSON array of 3 strings. Example: ["Tip 1", "Tip 2", "Tip 3"]
+    The user lives in Kerala (KSEB). They logged these appliances this month: {app_list}. {solar_str}
+    Their actual billed usage: {units} units (₹{bill} at ₹{rate}/unit).
+    Give 3 bullet points to reduce this bill. 
+    Format response strictly as JSON array of 3 strings: ["Tip 1", "Tip 2", "Tip 3"]
     """
     try:
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-        raw_text = response.text.strip().replace("```json", "").replace("```", "")
-        tips = json.loads(raw_text)
-        return {"tips": tips}
+        return {"tips": json.loads(response.text.strip().replace("```json", "").replace("```", ""))}
     except Exception:
-        return {"tips": ["Turn off phantom loads.", "Clean AC filters.", "Switch to LED bulbs."]}
+        return {"tips": ["Shift heavy appliance usage to daytime to maximize solar.", "Clean AC filters.", "Turn off phantom loads."]}
+
+# Boilerplate fallbacks
+@app.get("/api/v1/coach/{goal_id}")
+def get_ai_coach(goal_id: int): return {"advice": "Keep pushing!"}
+@app.get("/api/v1/predict/{goal_id}")
+def get_prediction(goal_id: int): return {"prediction": "Keep depositing!"}
+@app.get("/api/v1/monitor/{goal_id}")
+def daily_monitor(goal_id: int): return {"status": "Market stable."}
+@app.get("/api/v1/deal-hunter/{goal_id}")
+def find_deals(goal_id: int): return {"deal": "No deals.", "link": ""}
+@app.get("/api/v1/dupe-hunter/{goal_id}")
+def find_dupe(goal_id: int): return {"error": "No dupes."}
+@app.get("/api/v1/stock-check/{goal_id}")
+def check_stock(goal_id: int): return {"status": "UNKNOWN", "message": "Verify manually."}
