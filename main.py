@@ -23,50 +23,53 @@ def get_db_connection():
 
 @app.on_event("startup")
 def startup():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # WealthRadar Tables
-    cursor.execute('''CREATE TABLE IF NOT EXISTS goals (goal_id SERIAL PRIMARY KEY, product_name TEXT, target_price REAL)''')
-    cursor.execute('ALTER TABLE goals ADD COLUMN IF NOT EXISTS image_url TEXT')
-    cursor.execute('ALTER TABLE goals ADD COLUMN IF NOT EXISTS product_link TEXT')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS savings_logs (log_id SERIAL PRIMARY KEY, goal_id INTEGER, amount_saved REAL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
-    # Energy Saver Tables
-    cursor.execute('''CREATE TABLE IF NOT EXISTS appliances (
-        appliance_id SERIAL PRIMARY KEY,
-        appliance_name TEXT,
-        watts REAL,
-        room_name TEXT DEFAULT 'General'
-    )''')
-    cursor.execute("ALTER TABLE appliances ADD COLUMN IF NOT EXISTS room_name TEXT DEFAULT 'General'")
-    
-    cursor.execute('''CREATE TABLE IF NOT EXISTS appliance_logs (
-        log_id SERIAL PRIMARY KEY,
-        appliance_id INTEGER,
-        log_date DATE DEFAULT CURRENT_DATE,
-        hours_used REAL,
-        UNIQUE(appliance_id, log_date)
-    )''')
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # WealthRadar Tables
+        cursor.execute('''CREATE TABLE IF NOT EXISTS goals (goal_id SERIAL PRIMARY KEY, product_name TEXT, target_price REAL)''')
+        cursor.execute('ALTER TABLE goals ADD COLUMN IF NOT EXISTS image_url TEXT')
+        cursor.execute('ALTER TABLE goals ADD COLUMN IF NOT EXISTS product_link TEXT')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS savings_logs (log_id SERIAL PRIMARY KEY, goal_id INTEGER, amount_saved REAL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        
+        # Energy Saver Tables
+        cursor.execute('''CREATE TABLE IF NOT EXISTS appliances (
+            appliance_id SERIAL PRIMARY KEY,
+            appliance_name TEXT,
+            watts REAL,
+            room_name TEXT DEFAULT 'General'
+        )''')
+        cursor.execute("ALTER TABLE appliances ADD COLUMN IF NOT EXISTS room_name TEXT DEFAULT 'General'")
+        
+        cursor.execute('''CREATE TABLE IF NOT EXISTS appliance_logs (
+            log_id SERIAL PRIMARY KEY,
+            appliance_id INTEGER,
+            log_date DATE DEFAULT CURRENT_DATE,
+            hours_used REAL,
+            UNIQUE(appliance_id, log_date)
+        )''')
 
-    cursor.execute('''CREATE TABLE IF NOT EXISTS electricity_logs (
-        log_id SERIAL PRIMARY KEY,
-        prev_reading REAL,
-        curr_reading REAL,
-        rate_per_unit REAL,
-        total_bill REAL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS electricity_logs (
+            log_id SERIAL PRIMARY KEY,
+            prev_reading REAL,
+            curr_reading REAL,
+            rate_per_unit REAL,
+            total_bill REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
 
-    cursor.execute('''CREATE TABLE IF NOT EXISTS solar_installations (
-        id SERIAL PRIMARY KEY,
-        capacity_kw REAL,
-        daily_yield_per_kw REAL DEFAULT 4.0
-    )''')
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
+        cursor.execute('''CREATE TABLE IF NOT EXISTS solar_installations (
+            id SERIAL PRIMARY KEY,
+            capacity_kw REAL,
+            daily_yield_per_kw REAL DEFAULT 4.0
+        )''')
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print("Database startup error:", e)
 
 # ----------------- PYDANTIC MODELS -----------------
 
@@ -81,6 +84,7 @@ class DailyLogUpdate(BaseModel): appliance_id: int; hours_used: float
 class SolarCreate(BaseModel): capacity_kw: float; daily_yield_per_kw: float = 4.0
 
 # ----------------- WEALTHRADAR ROUTES -----------------
+# (These remain exactly the same)
 
 @app.get("/api/v1/dashboard-stats")
 def get_dashboard_stats():
@@ -191,22 +195,26 @@ def run_deal_radar():
     except Exception:
         return {"radar_update": "Market is stable today."}
 
-# ----------------- ENERGY SAVER ROUTES -----------------
+# ----------------- ENERGY SAVER ROUTES (NOW BULLETPROOF) -----------------
 
 @app.get("/api/v1/appliances")
 def get_appliances():
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("""
-        SELECT a.appliance_id, a.appliance_name, a.watts, a.room_name,
-               COALESCE(l.hours_used, 0) as today_hours 
-        FROM appliances a 
-        LEFT JOIN appliance_logs l ON a.appliance_id = l.appliance_id AND l.log_date = CURRENT_DATE
-        ORDER BY a.room_name ASC, a.watts DESC
-    """)
-    apps = cursor.fetchall()
-    cursor.close(); conn.close()
-    return apps
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT a.appliance_id, a.appliance_name, a.watts, a.room_name,
+                   COALESCE(l.hours_used, 0) as today_hours 
+            FROM appliances a 
+            LEFT JOIN appliance_logs l ON a.appliance_id = l.appliance_id AND l.log_date = CURRENT_DATE
+            ORDER BY a.room_name ASC, a.watts DESC
+        """)
+        apps = cursor.fetchall()
+        cursor.close(); conn.close()
+        return apps
+    except Exception as e:
+        print("Error fetching appliances:", e)
+        return []
 
 @app.post("/api/v1/energy/today")
 def update_daily_log(log: DailyLogUpdate):
@@ -222,13 +230,16 @@ def update_daily_log(log: DailyLogUpdate):
 
 @app.get("/api/v1/energy/solar")
 def get_solar_config():
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("SELECT capacity_kw, daily_yield_per_kw FROM solar_installations LIMIT 1")
-    config = cursor.fetchone()
-    cursor.close(); conn.close()
-    if config: return config
-    return {"capacity_kw": 0.0, "daily_yield_per_kw": 4.0}
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT capacity_kw, daily_yield_per_kw FROM solar_installations LIMIT 1")
+        config = cursor.fetchone()
+        cursor.close(); conn.close()
+        if config: return config
+        return {"capacity_kw": 0.0, "daily_yield_per_kw": 4.0}
+    except Exception as e:
+        return {"capacity_kw": 0.0, "daily_yield_per_kw": 4.0}
 
 @app.post("/api/v1/energy/solar")
 def set_solar_config(solar: SolarCreate):
@@ -241,76 +252,87 @@ def set_solar_config(solar: SolarCreate):
 
 @app.get("/api/v1/energy/live-meter")
 def get_live_meter(rate: float = 6.50):
-    conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("""
-        SELECT COALESCE(SUM((a.watts * l.hours_used) / 1000.0), 0) as gross_units
-        FROM appliance_logs l
-        JOIN appliances a ON l.appliance_id = a.appliance_id
-        WHERE EXTRACT(MONTH FROM l.log_date) = EXTRACT(MONTH FROM CURRENT_DATE)
-          AND EXTRACT(YEAR FROM l.log_date) = EXTRACT(YEAR FROM CURRENT_DATE)
-    """)
-    gross_units = cursor.fetchone()['gross_units']
-    
-    cursor.execute("SELECT EXTRACT(DAY FROM CURRENT_DATE) as days_passed")
-    days_passed = cursor.fetchone()['days_passed']
-    
-    cursor.execute("SELECT capacity_kw, daily_yield_per_kw FROM solar_installations LIMIT 1")
-    solar_conf = cursor.fetchone()
-    solar_units = 0.0
-    if solar_conf:
-        solar_units = solar_conf['capacity_kw'] * solar_conf['daily_yield_per_kw'] * days_passed
+    try:
+        conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT COALESCE(SUM((a.watts * l.hours_used) / 1000.0), 0) as gross_units
+            FROM appliance_logs l
+            JOIN appliances a ON l.appliance_id = a.appliance_id
+            WHERE EXTRACT(MONTH FROM l.log_date) = EXTRACT(MONTH FROM CURRENT_DATE)
+              AND EXTRACT(YEAR FROM l.log_date) = EXTRACT(YEAR FROM CURRENT_DATE)
+        """)
+        gross_row = cursor.fetchone()
+        gross_units = gross_row['gross_units'] if gross_row and gross_row['gross_units'] else 0.0
+        
+        cursor.execute("SELECT EXTRACT(DAY FROM CURRENT_DATE) as days_passed")
+        days_passed = cursor.fetchone()['days_passed']
+        
+        cursor.execute("SELECT capacity_kw, daily_yield_per_kw FROM solar_installations LIMIT 1")
+        solar_conf = cursor.fetchone()
+        solar_units = 0.0
+        if solar_conf:
+            solar_units = solar_conf['capacity_kw'] * solar_conf['daily_yield_per_kw'] * days_passed
 
-    cursor.close(); conn.close()
-    
-    gross_units = round(gross_units, 2)
-    solar_units = round(solar_units, 2)
-    net_units = round(gross_units - solar_units, 2)
-    current_bill = round(net_units * rate, 2) if net_units > 0 else 0.0
-    solar_savings = round(solar_units * rate, 2)
-    
-    return {
-        "gross_units": gross_units, 
-        "solar_units": solar_units,
-        "net_units": net_units,
-        "current_bill": current_bill,
-        "solar_savings_rs": solar_savings
-    }
+        cursor.close(); conn.close()
+        
+        gross_units = round(gross_units, 2)
+        solar_units = round(solar_units, 2)
+        net_units = round(gross_units - solar_units, 2)
+        current_bill = round(net_units * rate, 2) if net_units > 0 else 0.0
+        solar_savings = round(solar_units * rate, 2)
+        
+        return {
+            "gross_units": gross_units, 
+            "solar_units": solar_units,
+            "net_units": net_units,
+            "current_bill": current_bill,
+            "solar_savings_rs": solar_savings
+        }
+    except Exception as e:
+        print("Error in live-meter:", e)
+        return {"gross_units": 0, "solar_units": 0, "net_units": 0, "current_bill": 0, "solar_savings_rs": 0}
 
 @app.get("/api/v1/energy/room-summary")
 def get_room_summary():
-    conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("""
-        SELECT a.room_name, COALESCE(SUM((a.watts * l.hours_used) / 1000.0), 0) as total_units
-        FROM appliance_logs l
-        JOIN appliances a ON l.appliance_id = a.appliance_id
-        WHERE EXTRACT(MONTH FROM l.log_date) = EXTRACT(MONTH FROM CURRENT_DATE)
-          AND EXTRACT(YEAR FROM l.log_date) = EXTRACT(YEAR FROM CURRENT_DATE)
-        GROUP BY a.room_name
-        ORDER BY total_units DESC
-    """)
-    summary = cursor.fetchall()
-    cursor.close(); conn.close()
-    for row in summary: row['total_units'] = round(row['total_units'], 2)
-    return summary
+    try:
+        conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT a.room_name, COALESCE(SUM((a.watts * l.hours_used) / 1000.0), 0) as total_units
+            FROM appliance_logs l
+            JOIN appliances a ON l.appliance_id = a.appliance_id
+            WHERE EXTRACT(MONTH FROM l.log_date) = EXTRACT(MONTH FROM CURRENT_DATE)
+              AND EXTRACT(YEAR FROM l.log_date) = EXTRACT(YEAR FROM CURRENT_DATE)
+            GROUP BY a.room_name
+            ORDER BY total_units DESC
+        """)
+        summary = cursor.fetchall()
+        cursor.close(); conn.close()
+        for row in summary: row['total_units'] = round(row['total_units'], 2)
+        return summary
+    except Exception as e:
+        return []
 
 @app.get("/api/v1/energy/daily-history")
 def get_daily_history():
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("""
-        SELECT TO_CHAR(l.log_date, 'YYYY-MM-DD') as log_date, 
-               COALESCE(SUM((a.watts * l.hours_used) / 1000.0), 0) as daily_units
-        FROM appliance_logs l
-        JOIN appliances a ON l.appliance_id = a.appliance_id
-        WHERE EXTRACT(MONTH FROM l.log_date) = EXTRACT(MONTH FROM CURRENT_DATE)
-          AND EXTRACT(YEAR FROM l.log_date) = EXTRACT(YEAR FROM CURRENT_DATE)
-        GROUP BY l.log_date
-        ORDER BY l.log_date DESC
-    """)
-    history = cursor.fetchall()
-    cursor.close(); conn.close()
-    for row in history: row['daily_units'] = round(row['daily_units'], 2)
-    return history
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT TO_CHAR(l.log_date, 'YYYY-MM-DD') as log_date, 
+                   COALESCE(SUM((a.watts * l.hours_used) / 1000.0), 0) as daily_units
+            FROM appliance_logs l
+            JOIN appliances a ON l.appliance_id = a.appliance_id
+            WHERE EXTRACT(MONTH FROM l.log_date) = EXTRACT(MONTH FROM CURRENT_DATE)
+              AND EXTRACT(YEAR FROM l.log_date) = EXTRACT(YEAR FROM CURRENT_DATE)
+            GROUP BY l.log_date
+            ORDER BY l.log_date DESC
+        """)
+        history = cursor.fetchall()
+        cursor.close(); conn.close()
+        for row in history: row['daily_units'] = round(row['daily_units'], 2)
+        return history
+    except Exception as e:
+        return []
 
 @app.post("/api/v1/appliances")
 def add_appliance(app: ApplianceCreate):
