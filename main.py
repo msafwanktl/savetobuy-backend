@@ -52,7 +52,6 @@ class DailyLogUpdate(BaseModel): appliance_id: int; hours_used: float
 class SolarCreate(BaseModel): capacity_kw: float; daily_yield_per_kw: float = 4.0
 
 # ----------------- WEALTHRADAR ROUTES -----------------
-# (Existing identical routes omitted for brevity, ensure you keep them in your actual file)
 
 @app.get("/api/v1/dashboard-stats")
 def get_dashboard_stats():
@@ -116,6 +115,16 @@ def edit_goal(goal_id: int, goal: GoalUpdate):
     cursor.execute("UPDATE goals SET product_name = %s, target_price = %s, image_url = %s, product_link = %s WHERE goal_id = %s", (goal.product_name, goal.target_price, goal.image_url, goal.product_link, goal_id))
     conn.commit(); cursor.close(); conn.close()
     return {"message": "Goal updated!"}
+
+# --- RESTORED HISTORY ROUTE ---
+@app.get("/api/v1/history")
+def get_savings_history():
+    conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute('SELECT logs.log_id, logs.amount_saved, logs.created_at, goals.product_name FROM savings_logs logs JOIN goals ON logs.goal_id = goals.goal_id ORDER BY logs.log_id DESC')
+    logs = cursor.fetchall()
+    history = [{"id": l["log_id"], "amount": l["amount_saved"], "date": str(l["created_at"])[:16], "product": l["product_name"]} for l in logs]
+    cursor.close(); conn.close()
+    return history
 
 @app.post("/api/v1/smart-split")
 def smart_split(req: SmartSplitRequest):
@@ -222,7 +231,6 @@ def get_live_meter(rate: float = 6.50):
     try:
         conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # 1. Gross Appliance Usage
         cursor.execute("""
             SELECT COALESCE(SUM((a.watts * l.hours_used) / 1000.0), 0) as gross_units
             FROM appliance_logs l
@@ -233,7 +241,6 @@ def get_live_meter(rate: float = 6.50):
         gross_row = cursor.fetchone()
         gross_units = float(gross_row['gross_units']) if gross_row and gross_row['gross_units'] else 0.0
         
-        # 2. Solar Generation
         cursor.execute("SELECT EXTRACT(DAY FROM CURRENT_DATE) as days_passed")
         days_passed = float(cursor.fetchone()['days_passed'])
         
@@ -245,7 +252,6 @@ def get_live_meter(rate: float = 6.50):
 
         cursor.close(); conn.close()
         
-        # 3. Complete Financial Math Breakdown
         gross_units = round(gross_units, 2)
         solar_units = round(solar_units, 2)
         net_units = round(gross_units - solar_units, 2)
@@ -374,17 +380,3 @@ def energy_coach(units: float, bill: float, rate: float):
         return {"tips": json.loads(response.text.strip().replace("```json", "").replace("```", ""))}
     except Exception:
         return {"tips": ["Shift heavy appliance usage to daytime to maximize solar.", "Clean AC filters.", "Turn off phantom loads."]}
-
-# Boilerplate fallbacks
-@app.get("/api/v1/coach/{goal_id}")
-def get_ai_coach(goal_id: int): return {"advice": "Keep pushing!"}
-@app.get("/api/v1/predict/{goal_id}")
-def get_prediction(goal_id: int): return {"prediction": "Keep depositing!"}
-@app.get("/api/v1/monitor/{goal_id}")
-def daily_monitor(goal_id: int): return {"status": "Market stable."}
-@app.get("/api/v1/deal-hunter/{goal_id}")
-def find_deals(goal_id: int): return {"deal": "No deals.", "link": ""}
-@app.get("/api/v1/dupe-hunter/{goal_id}")
-def find_dupe(goal_id: int): return {"error": "No dupes."}
-@app.get("/api/v1/stock-check/{goal_id}")
-def check_stock(goal_id: int): return {"status": "UNKNOWN", "message": "Verify manually."}
