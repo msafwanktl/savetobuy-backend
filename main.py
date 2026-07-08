@@ -116,15 +116,17 @@ def edit_goal(goal_id: int, goal: GoalUpdate):
     conn.commit(); cursor.close(); conn.close()
     return {"message": "Goal updated!"}
 
-# --- RESTORED HISTORY ROUTE ---
 @app.get("/api/v1/history")
 def get_savings_history():
-    conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute('SELECT logs.log_id, logs.amount_saved, logs.created_at, goals.product_name FROM savings_logs logs JOIN goals ON logs.goal_id = goals.goal_id ORDER BY logs.log_id DESC')
-    logs = cursor.fetchall()
-    history = [{"id": l["log_id"], "amount": l["amount_saved"], "date": str(l["created_at"])[:16], "product": l["product_name"]} for l in logs]
-    cursor.close(); conn.close()
-    return history
+    try:
+        conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute('SELECT logs.log_id, logs.amount_saved, logs.created_at, goals.product_name FROM savings_logs logs JOIN goals ON logs.goal_id = goals.goal_id ORDER BY logs.log_id DESC')
+        logs = cursor.fetchall()
+        history = [{"id": l["log_id"], "amount": l["amount_saved"], "date": str(l["created_at"])[:16], "product": l["product_name"]} for l in logs]
+        cursor.close(); conn.close()
+        return history
+    except Exception:
+        return []
 
 @app.post("/api/v1/smart-split")
 def smart_split(req: SmartSplitRequest):
@@ -269,7 +271,6 @@ def get_live_meter(rate: float = 6.50):
             "solar_savings_rs": solar_savings
         }
     except Exception as e:
-        print("Error in live-meter:", e)
         return {"gross_units": 0, "solar_units": 0, "net_units": 0, "gross_bill": 0, "current_bill": 0, "solar_savings_rs": 0}
 
 @app.get("/api/v1/energy/room-summary")
@@ -288,6 +289,30 @@ def get_room_summary():
         summary = cursor.fetchall()
         cursor.close(); conn.close()
         for row in summary: row['total_units'] = round(row['total_units'], 2)
+        return summary
+    except Exception as e:
+        return []
+
+@app.get("/api/v1/energy/appliance-summary")
+def get_appliance_summary():
+    try:
+        conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT a.appliance_name, a.room_name, COALESCE(SUM(l.hours_used), 0) as total_hours,
+                   COALESCE(SUM((a.watts * l.hours_used) / 1000.0), 0) as total_units
+            FROM appliance_logs l
+            JOIN appliances a ON l.appliance_id = a.appliance_id
+            WHERE EXTRACT(MONTH FROM l.log_date) = EXTRACT(MONTH FROM CURRENT_DATE)
+              AND EXTRACT(YEAR FROM l.log_date) = EXTRACT(YEAR FROM CURRENT_DATE)
+            GROUP BY a.appliance_id, a.appliance_name, a.room_name
+            ORDER BY total_units DESC
+            LIMIT 5
+        """)
+        summary = cursor.fetchall()
+        cursor.close(); conn.close()
+        for row in summary:
+            row['total_units'] = round(row['total_units'], 2)
+            row['total_hours'] = round(row['total_hours'], 1)
         return summary
     except Exception as e:
         return []
@@ -311,6 +336,26 @@ def get_daily_history():
         cursor.close(); conn.close()
         for row in history: row['daily_units'] = round(row['daily_units'], 2)
         return history
+    except Exception as e:
+        return []
+
+@app.get("/api/v1/energy/history-detail")
+def get_history_detail(date: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT a.appliance_name, a.watts, a.room_name, l.hours_used,
+                   ((a.watts * l.hours_used) / 1000.0) as units
+            FROM appliance_logs l
+            JOIN appliances a ON l.appliance_id = a.appliance_id
+            WHERE TO_CHAR(l.log_date, 'YYYY-MM-DD') = %s AND l.hours_used > 0
+            ORDER BY units DESC
+        """, (date,))
+        detail = cursor.fetchall()
+        cursor.close(); conn.close()
+        for row in detail: row['units'] = round(row['units'], 2)
+        return detail
     except Exception as e:
         return []
 
@@ -360,7 +405,6 @@ def energy_coach(units: float, bill: float, rate: float):
         GROUP BY a.appliance_id
     """)
     apps = cursor.fetchall()
-    
     cursor.execute("SELECT capacity_kw FROM solar_installations LIMIT 1")
     solar = cursor.fetchone()
     cursor.close(); conn.close()
@@ -380,3 +424,17 @@ def energy_coach(units: float, bill: float, rate: float):
         return {"tips": json.loads(response.text.strip().replace("```json", "").replace("```", ""))}
     except Exception:
         return {"tips": ["Shift heavy appliance usage to daytime to maximize solar.", "Clean AC filters.", "Turn off phantom loads."]}
+
+# Boilerplate fallbacks
+@app.get("/api/v1/coach/{goal_id}")
+def get_ai_coach(goal_id: int): return {"advice": "Keep pushing!"}
+@app.get("/api/v1/predict/{goal_id}")
+def get_prediction(goal_id: int): return {"prediction": "Keep depositing!"}
+@app.get("/api/v1/monitor/{goal_id}")
+def daily_monitor(goal_id: int): return {"status": "Market stable."}
+@app.get("/api/v1/deal-hunter/{goal_id}")
+def find_deals(goal_id: int): return {"deal": "No deals.", "link": ""}
+@app.get("/api/v1/dupe-hunter/{goal_id}")
+def find_dupe(goal_id: int): return {"error": "No dupes."}
+@app.get("/api/v1/stock-check/{goal_id}")
+def check_stock(goal_id: int): return {"status": "UNKNOWN", "message": "Verify manually."}
