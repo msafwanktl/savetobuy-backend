@@ -26,17 +26,20 @@ def startup():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        # SaveToBuy Tables
         cursor.execute('''CREATE TABLE IF NOT EXISTS goals (goal_id SERIAL PRIMARY KEY, product_name TEXT, target_price REAL)''')
         cursor.execute('ALTER TABLE goals ADD COLUMN IF NOT EXISTS image_url TEXT')
         cursor.execute('ALTER TABLE goals ADD COLUMN IF NOT EXISTS product_link TEXT')
         cursor.execute('''CREATE TABLE IF NOT EXISTS savings_logs (log_id SERIAL PRIMARY KEY, goal_id INTEGER, amount_saved REAL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        
+        # KSEB Saver Tables
         cursor.execute('''CREATE TABLE IF NOT EXISTS appliances (appliance_id SERIAL PRIMARY KEY, appliance_name TEXT, watts REAL, room_name TEXT DEFAULT 'General')''')
         cursor.execute("ALTER TABLE appliances ADD COLUMN IF NOT EXISTS room_name TEXT DEFAULT 'General'")
         cursor.execute('''CREATE TABLE IF NOT EXISTS appliance_logs (log_id SERIAL PRIMARY KEY, appliance_id INTEGER, log_date DATE DEFAULT CURRENT_DATE, hours_used REAL, UNIQUE(appliance_id, log_date))''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS electricity_logs (log_id SERIAL PRIMARY KEY, prev_reading REAL, curr_reading REAL, rate_per_unit REAL, total_bill REAL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS solar_installations (id SERIAL PRIMARY KEY, capacity_kw REAL, daily_yield_per_kw REAL DEFAULT 4.0)''')
         
-        # NEW: Vehicle Logs Table
+        # Vehicle & GPS Tables
         cursor.execute('''CREATE TABLE IF NOT EXISTS vehicle_logs (
             log_id SERIAL PRIMARY KEY, 
             vehicle_name TEXT, 
@@ -45,6 +48,13 @@ def startup():
             fuel_added REAL, 
             cost_per_unit REAL, 
             log_date DATE DEFAULT CURRENT_DATE
+        )''')
+        
+        cursor.execute('''CREATE TABLE IF NOT EXISTS gps_trips (
+            trip_id SERIAL PRIMARY KEY,
+            distance_km REAL,
+            estimated_cost REAL,
+            trip_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
         
         conn.commit(); cursor.close(); conn.close()
@@ -63,13 +73,16 @@ class ElectricityLogCreate(BaseModel): prev_reading: float; curr_reading: float;
 class DailyLogUpdate(BaseModel): appliance_id: int; hours_used: float
 class SolarCreate(BaseModel): capacity_kw: float; daily_yield_per_kw: float = 4.0
 
-# NEW: Vehicle Log Model
 class VehicleLog(BaseModel):
     vehicle_name: str
     odometer_start: float
     odometer_end: float
     fuel_added: float
     cost_per_unit: float
+
+class GPSTrip(BaseModel):
+    distance_km: float
+    estimated_cost: float
 
 # ----------------- WEALTHRADAR ROUTES -----------------
 
@@ -445,7 +458,7 @@ def energy_coach(units: float, bill: float, rate: float):
     except Exception:
         return {"tips": ["Shift heavy appliance usage to daytime to maximize solar.", "Clean AC filters.", "Turn off phantom loads."]}
 
-# ----------------- VEHICLE TRACKER ROUTES -----------------
+# ----------------- VEHICLE & GPS ROUTES -----------------
 
 @app.post("/api/v1/vehicle/log")
 def log_vehicle_usage(log: VehicleLog):
@@ -465,17 +478,53 @@ def get_vehicle_stats():
             SELECT log_id, vehicle_name, odometer_start, odometer_end, fuel_added, cost_per_unit, TO_CHAR(log_date, 'YYYY-MM-DD') as log_date,
                    (odometer_end - odometer_start) as distance,
                    CASE WHEN fuel_added > 0 THEN ((odometer_end - odometer_start) / fuel_added) ELSE 0 END as mileage,
-                   CASE WHEN (odometer_end - odometer_start) > 0 THEN ((fuel_added * cost_per_unit) / (odometer_end - odometer_start)) ELSE 0 END as cost_per_km
+                   CASE WHEN (odometer_end - odometer_start) > 0 THEN ((fuel_added * cost_per_unit) / ((odometer_end - odometer_start)/fuel_added)) ELSE 0 END as cost_per_km
             FROM vehicle_logs 
             ORDER BY log_id DESC
         """)
         stats = cursor.fetchall()
+        
+        # Calculate historical average mileage
+        avg_mileage = 0.0
+        if len(stats) > 0:
+            total_dist = sum([s['distance'] for s in stats])
+            total_fuel = sum([s['fuel_added'] for s in stats])
+            if total_fuel > 0:
+                avg_mileage = round(total_dist / total_fuel, 2)
+
         cursor.close(); conn.close()
+        
         for stat in stats:
             stat['mileage'] = round(stat['mileage'], 2)
-            stat['cost_per_km'] = round(stat['cost_per_km'], 2)
-        return stats
+            # Fix cost per km math
+            stat['cost_per_km'] = round((stat['cost_per_unit'] / stat['mileage']) if stat['mileage'] > 0 else 0, 2)
+            
+        return {"logs": stats, "historical_average_kmpl": avg_mileage}
     except Exception as e:
+        return {"logs": [], "historical_average_kmpl": 0.0}
+
+@app.post("/api/v1/vehicle/trip")
+def save_gps_trip(trip: GPSTrip):
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO gps_trips (distance_km, estimated_cost)
+        VALUES (%s, %s)
+    """, (trip.distance_km, trip.estimated_cost))
+    conn.commit(); cursor.close(); conn.close()
+    return {"message": "Trip saved"}
+
+@app.get("/api/v1/vehicle/trips")
+def get_gps_trips():
+    try:
+        conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT trip_id, distance_km, estimated_cost, TO_CHAR(trip_date, 'YYYY-MM-DD HH24:MI') as date FROM gps_trips ORDER BY trip_id DESC LIMIT 20")
+        trips = cursor.fetchall()
+        cursor.close(); conn.close()
+        for t in trips:
+            t['distance_km'] = round(t['distance_km'], 2)
+            t['estimated_cost'] = round(t['estimated_cost'], 2)
+        return trips
+    except Exception:
         return []
 
 # Boilerplate fallbacks
