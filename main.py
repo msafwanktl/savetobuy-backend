@@ -35,6 +35,18 @@ def startup():
         cursor.execute('''CREATE TABLE IF NOT EXISTS appliance_logs (log_id SERIAL PRIMARY KEY, appliance_id INTEGER, log_date DATE DEFAULT CURRENT_DATE, hours_used REAL, UNIQUE(appliance_id, log_date))''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS electricity_logs (log_id SERIAL PRIMARY KEY, prev_reading REAL, curr_reading REAL, rate_per_unit REAL, total_bill REAL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS solar_installations (id SERIAL PRIMARY KEY, capacity_kw REAL, daily_yield_per_kw REAL DEFAULT 4.0)''')
+        
+        # NEW: Vehicle Logs Table
+        cursor.execute('''CREATE TABLE IF NOT EXISTS vehicle_logs (
+            log_id SERIAL PRIMARY KEY, 
+            vehicle_name TEXT, 
+            odometer_start REAL, 
+            odometer_end REAL, 
+            fuel_added REAL, 
+            cost_per_unit REAL, 
+            log_date DATE DEFAULT CURRENT_DATE
+        )''')
+        
         conn.commit(); cursor.close(); conn.close()
     except Exception as e:
         print("Database startup error:", e)
@@ -50,6 +62,14 @@ class ApplianceUpdate(BaseModel): appliance_name: str; watts: float; room_name: 
 class ElectricityLogCreate(BaseModel): prev_reading: float; curr_reading: float; rate_per_unit: float
 class DailyLogUpdate(BaseModel): appliance_id: int; hours_used: float
 class SolarCreate(BaseModel): capacity_kw: float; daily_yield_per_kw: float = 4.0
+
+# NEW: Vehicle Log Model
+class VehicleLog(BaseModel):
+    vehicle_name: str
+    odometer_start: float
+    odometer_end: float
+    fuel_added: float
+    cost_per_unit: float
 
 # ----------------- WEALTHRADAR ROUTES -----------------
 
@@ -424,6 +444,39 @@ def energy_coach(units: float, bill: float, rate: float):
         return {"tips": json.loads(response.text.strip().replace("```json", "").replace("```", ""))}
     except Exception:
         return {"tips": ["Shift heavy appliance usage to daytime to maximize solar.", "Clean AC filters.", "Turn off phantom loads."]}
+
+# ----------------- VEHICLE TRACKER ROUTES -----------------
+
+@app.post("/api/v1/vehicle/log")
+def log_vehicle_usage(log: VehicleLog):
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO vehicle_logs (vehicle_name, odometer_start, odometer_end, fuel_added, cost_per_unit)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (log.vehicle_name, log.odometer_start, log.odometer_end, log.fuel_added, log.cost_per_unit))
+    conn.commit(); cursor.close(); conn.close()
+    return {"message": "Vehicle log recorded"}
+
+@app.get("/api/v1/vehicle/stats")
+def get_vehicle_stats():
+    try:
+        conn = get_db_connection(); cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT log_id, vehicle_name, odometer_start, odometer_end, fuel_added, cost_per_unit, TO_CHAR(log_date, 'YYYY-MM-DD') as log_date,
+                   (odometer_end - odometer_start) as distance,
+                   CASE WHEN fuel_added > 0 THEN ((odometer_end - odometer_start) / fuel_added) ELSE 0 END as mileage,
+                   CASE WHEN (odometer_end - odometer_start) > 0 THEN ((fuel_added * cost_per_unit) / (odometer_end - odometer_start)) ELSE 0 END as cost_per_km
+            FROM vehicle_logs 
+            ORDER BY log_id DESC
+        """)
+        stats = cursor.fetchall()
+        cursor.close(); conn.close()
+        for stat in stats:
+            stat['mileage'] = round(stat['mileage'], 2)
+            stat['cost_per_km'] = round(stat['cost_per_km'], 2)
+        return stats
+    except Exception as e:
+        return []
 
 # Boilerplate fallbacks
 @app.get("/api/v1/coach/{goal_id}")
